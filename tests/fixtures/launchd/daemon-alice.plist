@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.heretik.herdr-wake.alice</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/alice/.local/bin/herdr-wake</string><string>boot</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><false/>
+  <key>AbandonProcessGroup</key><true/>
+  <key>UserName</key><string>alice</string>
+  <key>GroupName</key><string>staff</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>HOME</key><string>/Users/alice</string>
+    <key>USER</key><string>alice</string>
+    <key>SHELL</key><string>/bin/zsh</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin</string></dict>
+</dict></plist>

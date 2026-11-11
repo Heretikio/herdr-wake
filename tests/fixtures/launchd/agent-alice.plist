@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.heretik.herdr-wake</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/alice/.local/bin/herdr-wake</string><string>boot</string></array>
+  <key>LimitLoadToSessionType</key><string>Aqua</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><false/>
+  <key>AbandonProcessGroup</key><true/>
+  <key>StandardOutPath</key><string>/Users/alice/Library/Logs/herdr-wake/boot.log</string>
+  <key>StandardErrorPath</key><string>/Users/alice/Library/Logs/herdr-wake/boot.log</string>
+</dict></plist>

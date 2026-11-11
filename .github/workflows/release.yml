@@ -1,0 +1,154 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Tag matches Cargo.toml
+        id: version
+        run: |
+          version=$(awk '
+            /^\[/ { in_pkg = ($0 == "[package]") }
+            in_pkg && /^version[ \t]*=/ { gsub(/^version[ \t]*=[ \t]*"|".*$/, ""); print; exit }
+          ' Cargo.toml)
+          tag="${GITHUB_REF_NAME}"
+          if [ -z "$version" ]; then
+            echo "::error::Could not read the package version from Cargo.toml"
+            exit 1
+          fi
+          if [ "$tag" != "v$version" ]; then
+            echo "::error::Tag $tag does not match Cargo.toml version $version (expected v$version)"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: check
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # Apple's toolchain on an Apple silicon runner builds both macOS
+          # arches; no Intel runner needed.
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+          # Linux: a static musl build on a runner of the same CPU, so no
+          # cross linker, Docker image or zig is involved.
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-11-10
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: musl tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        run: cargo build --release --locked --target "$TARGET"
+
+      - name: Strip and package
+        run: |
+          bin="target/$TARGET/release/herdr-wake"
+          strip "$bin"
+          if [ "$RUNNER_OS" = macOS ]; then
+            # strip can drop the linker's ad-hoc signature, and Apple silicon
+            # refuses to run unsigned code.
+            codesign --force --sign - "$bin"
+          fi
+          file "$bin"
+          case "$TARGET" in
+            "$(uname -m | sed 's/arm64/aarch64/')"-*) "$bin" --help >/dev/null ;;
+          esac
+          name="herdr-wake-$VERSION-$TARGET"
+          mkdir -p stage dist
+          files="herdr-wake LICENSE"
+          [ ! -f README.md ] || files="$files README.md"
+          for f in $files; do
+            if [ "$f" = herdr-wake ]; then cp "$bin" stage/; else cp "$f" stage/; fi
+          done
+          # Plain member names (install.sh extracts "herdr-wake" by name);
+          # COPYFILE_DISABLE keeps macOS tar from adding ._ files.
+          (cd stage && COPYFILE_DISABLE=1 tar -czf "../dist/$name.tar.gz" $files)
+          tar -tzf "dist/$name.tar.gz"
+          cd dist
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          else
+            shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+          fi
+          cat "$name.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    # The only job with more than a read-only token: it publishes the
+    # release and signs the build provenance attestation.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+
+      # Build provenance: ties each archive to this workflow run and commit.
+      # Unlike the .sha256 files, it cannot be replaced by whoever replaces
+      # a release asset. Verify with:
+      #   gh attestation verify herdr-wake-<version>-<target>.tar.gz --repo <owner>/<repo>
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          cp scripts/install.sh scripts/uninstall.sh dist/
+          ls -l dist
+          prerelease=""
+          case "$VERSION" in *-*) prerelease="--prerelease" ;; esac
+          # shellcheck disable=SC2086
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "herdr-wake $VERSION" --generate-notes --verify-tag $prerelease

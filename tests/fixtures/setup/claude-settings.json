@@ -1,0 +1,19 @@
+{
+  // My Claude settings, hand edited.
+  "model": "opus",
+  "permissions": {
+    "allow": ["Bash(git status)", "Read"], // keep this list short
+  },
+  "hooks": {
+    /* my own formatter hook */
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "~/bin/fmt-hook", "timeout": 30 },
+        ],
+      },
+    ],
+  },
+  "theme": "dark", // trailing comma follows
+}

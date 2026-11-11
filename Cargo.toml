@@ -1,0 +1,26 @@
+[package]
+name = "herdr-wake"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Starts herdr-core at boot and resumes coding-agent sessions after a reboot"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6", features = ["derive"] }
+jsonc-parser = { version = "0.34.0", features = ["cst"] }
+rustix = { version = "1.1.6", features = ["process", "fs", "system"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+toml_edit = { version = "0.25.19", features = ["serde"] }
+
+[profile.release]
+lto = true
+strip = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[target."cfg(unix)".dependencies]
+libc = "0.2.191"

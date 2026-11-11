@@ -1,0 +1,7 @@
+# herdr-core settings
+socket = "/private/tmp/hw-1/c.sock" # short path for tests
+
+shell = ["/bin/zsh", "-l"] # my zsh
+
+[log]
+level = "info"

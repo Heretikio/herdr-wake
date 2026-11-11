@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>@DAEMON_LABEL@</string>
+  <key>ProgramArguments</key><array>
+    <string>@BIN@</string><string>boot</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><false/>
+  <key>AbandonProcessGroup</key><true/>
+  <key>UserName</key><string>@USER@</string>
+  <key>GroupName</key><string>staff</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>HOME</key><string>@HOME@</string>
+    <key>USER</key><string>@USER@</string>
+    <key>SHELL</key><string>@SHELL@</string>
+    <key>PATH</key><string>@PATH@</string></dict>
+</dict></plist>

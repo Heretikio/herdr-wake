@@ -1,0 +1,13 @@
+# Written by herdr-wake install; herdr-wake uninstall removes it.
+[Unit]
+Description=Start herdr-core and resume agent sessions
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-@BOOT_ENV@
+ExecStart=@BIN@ boot
+TimeoutStartSec=180
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-latest is Apple silicon (arm64); ubuntu-latest is x86_64.
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-11-10
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      # herdr-core's official installer (README of herdr-core, served from
+      # releases.herdr.dev). It is non-interactive, needs no sudo, and puts
+      # herdr-core into ~/.local/bin with `hc` beside it. With hc on PATH the
+      # integration tests run instead of skipping. The tests start their own
+      # isolated core under a temporary HOME; this step starts nothing.
+      - name: Install the newest herdr-core
+        run: |
+          curl -fsSL https://releases.herdr.dev/core/install.sh | sh
+          bin="$HOME/.local/bin"
+          # The installer skips the hc link when some other hc is on PATH.
+          [ -e "$bin/hc" ] || ln -s herdr-core "$bin/hc"
+          echo "$bin" >> "$GITHUB_PATH"
+
+      - name: herdr-core version
+        run: |
+          command -v hc
+          hc --version
+
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: No em dash anywhere
+        run: |
+          # The character is built from its UTF-8 bytes so this file does not
+          # contain it.
+          dash=$(printf '\342\200\224')
+          if git grep -n -I -e "$dash"; then
+            echo "::error::Found an em dash (U+2014) in the files above. Use a colon, comma or parentheses."
+            exit 1
+          fi
+
+      - name: shellcheck
+        run: |
+          shellcheck --version
+          shellcheck --shell=sh scripts/*.sh

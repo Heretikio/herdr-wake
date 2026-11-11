@@ -1,0 +1,2 @@
+{"timestamp":"2026-11-10T14:15:02.123Z","type":"session_meta","payload":{"session_id":"019a6f2e-7c41-7d30-9f0e-3b2a1c4d5e6f","id":"019a6f2e-7c41-7d30-9f0e-3b2a1c4d5e6f","timestamp":"2026-11-10T14:15:02.100Z","cwd":"/home/u/proj","originator":"codex_cli_rs","cli_version":"0.180.0","source":"cli","thread_source":"user","model_provider":"openai"}}
+{"timestamp":"2026-11-10T14:15:09.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}

@@ -1,0 +1,10 @@
+{
+  "session_id": "7c9d3e2f-aaaa-4bbb-8ccc-ddddeeeeffff",
+  "transcript_path": "/home/u/.claude/projects/-home-u-proj/7c9d3e2f-aaaa-4bbb-8ccc-ddddeeeeffff.jsonl",
+  "cwd": "/home/u/proj",
+  "hook_event_name": "SessionStart",
+  "permission_mode": "acceptEdits",
+  "source": "clear",
+  "model": "claude-opus-5-5",
+  "session_title": "Fix the flaky test"
+}

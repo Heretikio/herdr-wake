@@ -1,0 +1,7 @@
+{
+  // OpenCode CLI settings
+  "theme": "system",
+  "plugins": [
+    "./my-plugin", // mine
+  ],
+}

@@ -1,0 +1,83 @@
+name: Nightly
+
+# Runs the full test suite against the newest herdr-core release every day,
+# so a herdr-core change that breaks herdr-wake shows up before users hit it.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    outputs:
+      # Both legs install the same newest release, so either value will do.
+      core-version: ${{ steps.core.outputs.version }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-11-10
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      # Same installer as ci.yml (see the comment there).
+      - name: Install the newest herdr-core
+        run: |
+          curl -fsSL https://releases.herdr.dev/core/install.sh | sh
+          bin="$HOME/.local/bin"
+          [ -e "$bin/hc" ] || ln -s herdr-core "$bin/hc"
+          echo "$bin" >> "$GITHUB_PATH"
+
+      - name: herdr-core version
+        id: core
+        run: |
+          command -v hc
+          hc --version
+          version=$(hc --version | awk '{ print $NF }')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Tested against herdr-core $version on ${{ matrix.os }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Full test suite
+        run: cargo test
+
+  report:
+    needs: test
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CORE_VERSION: ${{ needs.test.outputs.core-version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          version=${CORE_VERSION:-unknown}
+          export TITLE="Nightly failed against herdr-core $version"
+          body="The nightly test run failed against herdr-core $version on $(date -u +%Y-%m-%d).
+
+          Run: $RUN_URL"
+          number=$(gh issue list --state open --search "\"$TITLE\" in:title" \
+            --json number,title --jq '.[] | select(.title == env.TITLE) | .number' | head -n 1)
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+            echo "Commented on issue #$number"
+          else
+            gh issue create --title "$TITLE" --body "$body"
+          fi

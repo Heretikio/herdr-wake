@@ -1,0 +1,47 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "address": "t3",
+    "name": "api",
+    "labels": {
+      "team": "infra",
+      "wake": "{\"v\":1}"
+    },
+    "argv": ["/usr/local/bin/herdr-wake", "shell"],
+    "cwd": "/home/u/proj",
+    "keep": true,
+    "state": "live",
+    "pid": 21341,
+    "exit_code": null,
+    "signal": null,
+    "reason": null,
+    "created_ms": 1794354275682,
+    "finished_ms": null,
+    "screen": "exact",
+    "cols": 120,
+    "rows": 40,
+    "identity": "ghostty 1.2.0",
+    "status": { "state": "idle", "app": "claude" },
+    "status_ms": 1794354277753,
+    "records": { "sub": { "state": "working", "progress": 40 } },
+    "turn": 2,
+    "reported": true,
+    "title": "claude",
+    "parent": null,
+    "notify": false,
+    "die_with_parent": false,
+    "rm": false,
+    "template": null,
+    "first_message": null,
+    "foreground": {
+      "pid": 21377,
+      "name": "node",
+      "argv": ["claude", "--resume", "0b5a2c1e-1111-4222-8333-444455556666"],
+      "cwd": "/home/u/proj/sub"
+    },
+    "paste_gap_ms": null,
+    "stop": null,
+    "submit": null
+  }
+}

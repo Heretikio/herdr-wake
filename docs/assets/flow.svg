@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 624" width="880" height="624" role="img" aria-labelledby="flow-title flow-desc">
+  <title id="flow-title">herdr-wake across a reboot</title>
+  <desc id="flow-desc">While the machine is up, an agent hook runs herdr-wake, which stores the session as a label on the herdr-core terminal. After a reboot, the boot service starts herdr-core, which recreates the kept terminals; herdr-wake runs in each one, resumes the agent that was running there, and then hands over to the normal shell.</desc>
+  <defs>
+    <marker id="flow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#4f5d75"/>
+    </marker>
+    <marker id="flow-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#bf4520"/>
+    </marker>
+    <style>
+      .title { font-family: 'Instrument Serif', Georgia, 'Times New Roman', serif; font-size: 26px; fill: #2d3142; }
+      .sub { font-family: system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; font-size: 13px; fill: #5a6580; }
+      .eyebrow { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.14em; fill: #4f5d75; }
+      .name { font-family: system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 600; fill: #2d3142; }
+      .label { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 10px; fill: #5a6580; }
+      .arrowlabel { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 9px; letter-spacing: 0.06em; fill: #4f5d75; }
+      .callout { font-family: 'Instrument Serif', Georgia, 'Times New Roman', serif; font-style: italic; font-size: 15px; fill: #4f5d75; }
+      .foot { font-family: system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; font-size: 12px; fill: #5a6580; }
+    </style>
+  </defs>
+
+  <!-- Own background, so the drawing reads the same in GitHub light and dark mode. -->
+  <rect x="0.5" y="0.5" width="879" height="623" rx="8" fill="#f5f5f5" stroke="#bfc0c0"/>
+
+  <text class="title" x="32" y="48">herdr-wake across a reboot</text>
+  <text class="sub" x="32" y="72">It records each agent session while the machine is up, and resumes it after a reboot.</text>
+
+  <!-- Column headers -->
+  <text class="eyebrow" x="56" y="112">1  WHILE THE MACHINE IS UP</text>
+  <text class="eyebrow" x="416" y="112" text-anchor="middle">2  REBOOT</text>
+  <text class="eyebrow" x="496" y="112">3  AFTER THE REBOOT</text>
+
+  <!-- Reboot divider -->
+  <line x1="416" y1="128" x2="416" y2="556" stroke="#4f5d75" stroke-width="1" stroke-dasharray="5,4"/>
+  <rect x="376" y="320" width="80" height="32" rx="4" fill="#f5f5f5" stroke="#4f5d75"/>
+  <text class="arrowlabel" x="416" y="334" text-anchor="middle">POWER OFF</text>
+  <text class="arrowlabel" x="416" y="346" text-anchor="middle">AND ON</text>
+
+  <!-- Arrows first, boxes after -->
+  <!-- Column 1 -->
+  <line x1="192" y1="176" x2="192" y2="230" stroke="#4f5d75" stroke-width="1" marker-end="url(#flow-arrow)"/>
+  <rect x="202" y="196" width="84" height="14" fill="#f5f5f5"/>
+  <text class="arrowlabel" x="244" y="206" text-anchor="middle">JSON ON STDIN</text>
+  <line x1="192" y1="280" x2="192" y2="334" stroke="#bf4520" stroke-width="1.2" marker-end="url(#flow-arrow-accent)"/>
+  <rect x="202" y="300" width="76" height="14" fill="#f5f5f5"/>
+  <text class="arrowlabel" x="240" y="310" text-anchor="middle">WRITES LABEL</text>
+
+  <!-- Column 3 -->
+  <line x1="636" y1="176" x2="636" y2="202" stroke="#4f5d75" stroke-width="1" marker-end="url(#flow-arrow)"/>
+  <line x1="636" y1="252" x2="636" y2="278" stroke="#4f5d75" stroke-width="1" marker-end="url(#flow-arrow)"/>
+  <line x1="636" y1="328" x2="636" y2="354" stroke="#4f5d75" stroke-width="1" marker-end="url(#flow-arrow)"/>
+  <line x1="636" y1="404" x2="636" y2="430" stroke="#bf4520" stroke-width="1.2" marker-end="url(#flow-arrow-accent)"/>
+  <line x1="636" y1="480" x2="636" y2="506" stroke="#4f5d75" stroke-width="1" marker-end="url(#flow-arrow)"/>
+  <!-- No record: straight to the normal shell -->
+  <path d="M776 380 H788 Q796 380 796 388 V524 Q796 532 788 532 H778" fill="none" stroke="#4f5d75" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#flow-arrow)"/>
+  <rect x="804" y="449" width="60" height="14" fill="#f5f5f5"/>
+  <text class="arrowlabel" x="834" y="459" text-anchor="middle">NO RECORD</text>
+
+  <!-- Column 1 nodes -->
+  <rect x="56" y="128" width="272" height="48" rx="6" fill="#ffffff" stroke="#2d3142"/>
+  <text class="name" x="72" y="149">Agent hook or plugin</text>
+  <text class="label" x="72" y="166">Claude Code, Codex, Pi, OpenCode</text>
+
+  <rect x="56" y="232" width="272" height="48" rx="6" fill="#ffffff" stroke="#2d3142"/>
+  <text class="name" x="72" y="253">herdr-wake hook</text>
+  <text class="label" x="72" y="270">skips sub-agents and one-shot runs</text>
+
+  <rect x="56" y="336" width="272" height="48" rx="6" fill="#f8ebe6" stroke="#bf4520" stroke-width="1.2"/>
+  <text class="name" x="72" y="357">Label on the terminal</text>
+  <text class="label" x="72" y="374">session id, folder, launch flags</text>
+
+  <text class="callout" x="56" y="420">The label lives in herdr-core and</text>
+  <text class="callout" x="56" y="440">comes back with the terminal.</text>
+
+  <!-- Column 3 nodes -->
+  <rect x="496" y="128" width="280" height="48" rx="6" fill="#ffffff" stroke="#2d3142"/>
+  <text class="name" x="512" y="149">Boot service</text>
+  <text class="label" x="512" y="166">launchd agent or systemd user unit</text>
+
+  <rect x="496" y="204" width="280" height="48" rx="6" fill="#ffffff" stroke="#2d3142"/>
+  <text class="name" x="512" y="225">herdr-core starts</text>
+  <text class="label" x="512" y="242">no app or phone needed</text>
+
+  <rect x="496" y="280" width="280" height="48" rx="6" fill="#ffffff" stroke="#2d3142"/>
+  <text class="name" x="512" y="301">Kept terminals recreated</text>
+  <text class="label" x="512" y="318">each runs core's shell setting</text>
+
+  <rect x="496" y="356" width="280" height="48" rx="6" fill="#ffffff" stroke="#2d3142"/>
+  <text class="name" x="512" y="377">herdr-wake shell, in each one</text>
+  <text class="label" x="512" y="394">reads the label, waits its turn</text>
+
+  <rect x="496" y="432" width="280" height="48" rx="6" fill="#f8ebe6" stroke="#bf4520" stroke-width="1.2"/>
+  <text class="name" x="512" y="453">Agent resumed</text>
+  <text class="label" x="512" y="470">same session, same folder, same flags</text>
+
+  <rect x="496" y="508" width="280" height="48" rx="6" fill="#ffffff" stroke="#2d3142"/>
+  <text class="name" x="512" y="529">Your normal shell</text>
+  <text class="label" x="512" y="546">when the agent exits, or right away</text>
+
+  <!-- Footer -->
+  <line x1="32" y1="580" x2="848" y2="580" stroke="#bfc0c0" stroke-width="1"/>
+  <text class="foot" x="32" y="604">A session you quit before the reboot stays closed. A terminal that never ran an agent wakes to a plain shell.</text>
+</svg>
