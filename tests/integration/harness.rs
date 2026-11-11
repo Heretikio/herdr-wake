@@ -8,9 +8,13 @@
 //!   macOS, `/tmp/hw-<pid>-<n>` elsewhere): a Unix socket path is limited to
 //!   about 103 bytes and a temp home is far deeper than that.
 //! - Every `hc` call runs with a cleared environment: that `HOME`, a minimal
-//!   `PATH` and `SSH_CONNECTION=test`. The last one forces core's direct
-//!   start path, so it never touches launchd jobs shared with the
-//!   developer's real core. No `HC_*` or `XDG_*` variable is ever set.
+//!   `PATH`, `SSH_CONNECTION=test` and `XDG_RUNTIME_DIR` set to the test's
+//!   own socket folder. `SSH_CONNECTION` forces core's direct start path on
+//!   macOS, so it never touches launchd jobs shared with the developer's real
+//!   core. The private `XDG_RUNTIME_DIR` does the same on Linux: without it,
+//!   core falls back to `/run/user/<uid>` and, where a systemd user manager
+//!   runs there (CI runners, desktops), starts the test core as a real user
+//!   service outside the test. No `HC_*` or other `XDG_*` variable is set.
 //! - A "reboot" is `hc server stop` followed by `hc server start`.
 //! - Dropping a `Harness` stops its core, waits for every process of that
 //!   home to go, and checks that the herdr processes that ran before the
@@ -317,6 +321,12 @@ impl Harness {
         env.insert(
             "PATH".to_string(),
             format!("{}:{MIN_PATH}", self.home.join("bin").display()),
+        );
+        // A runtime dir of the test's own keeps core off the real systemd
+        // user manager on Linux (see the module docs).
+        env.insert(
+            "XDG_RUNTIME_DIR".to_string(),
+            self.sock_dir.display().to_string(),
         );
         env
     }
