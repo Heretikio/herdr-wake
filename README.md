@@ -97,7 +97,7 @@ Nothing here is labeled "supported" yet: that label needs a pass of the full rea
 
 | Platform | Status | What has run there |
 |---|---|---|
-| macOS, Apple silicon | Claude Code reboot-tested 2026-11-10, login-screen case only | Full suite: 593 tests, including 23 end-to-end tests against a real herdr-core 0.1.20. One real reboot (macOS 27.2, herdr-core 0.1.18, auto-login off) where the first connection was the Herdr desktop app on another machine. The LaunchAgent at login or with auto-login, and `--before-login`, have not been reboot-tested |
+| macOS, Apple silicon | Claude Code reboot-tested 2026-11-10, Codex 2026-11-14, login-screen case only | Full suite: 593 tests, including 23 end-to-end tests against a real herdr-core 0.1.20. One real reboot (macOS 27.2, herdr-core 0.1.18, auto-login off) where the first connection was the Herdr desktop app on another machine. The LaunchAgent at login or with auto-login, and `--before-login`, have not been reboot-tested |
 | macOS, Intel | not tested | A release build is produced; no tests have run on Intel |
 | Linux, arm64 | automated tests only | Full suite: 595 tests, including the same 23 end-to-end tests against a real herdr-core 0.1.20 and the Linux-only platform tests. No real reboot |
 | Linux, x86_64 | Claude Code reboot-tested 2026-11-10 | Two real reboots of a Fedora 44 machine (bare metal, systemd, herdr-core 0.1.18): one with a stand-in agent, one with real Claude Code plus stand-ins. `cargo clippy` for this target; `doctor` and `status` run by hand. The test suite has not run on x86_64 hardware (CI is set up for Ubuntu x86_64 but has not run yet) |
@@ -113,7 +113,7 @@ The rule for this project: an agent and OS pair is "supported" only after it pas
 | # | OS | Agent | First connection after boot | Result | Date | Versions (herdr-wake, herdr-core, agent) |
 |---|---|---|---|---|---|---|
 | 1 | macOS | Claude Code | SSH | not yet run | | |
-| 2 | macOS | Codex | SSH | not yet run | | |
+| 2 | macOS arm64 (27.2, auto-login off, at the login screen) | Codex | a Herdr client connection (not SSH), which started herdr-core | pass: resumed into its session; confirmed only at the first prompt (Codex 0.169 runs its start hook then), so it showed as unconfirmed until then | 2026-11-14 | 0.1.1, 0.1.18, 0.169.0 |
 | 3 | macOS | Pi | SSH | not yet run | | |
 | 4 | macOS | OpenCode | SSH | not yet run | | |
 | 5 | Linux x86_64 (Fedora 44) | Claude Code | none: the boot service started herdr-core before login, with nobody connected | resumed by itself; then waited at Claude Code's folder trust prompt (home folder), conversation intact once answered | 2026-11-10 | 0.1.0, 0.1.18, 2.1.304 |

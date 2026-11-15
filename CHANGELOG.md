@@ -4,10 +4,20 @@ All notable changes to herdr-wake. The format follows [Keep a Changelog](https:/
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-14
+
 ### Fixed
 
 - **Codex 0.167 sessions were never recorded.** Codex 0.167 labels its own terminal sessions `source: "vscode"`, which herdr-wake read as the IDE extension and skipped as non-interactive. A `vscode` session now counts as interactive when its `originator` is the terminal client (`codex-tui` or `codex_cli_rs`); the IDE extension and the desktop app are still skipped. ([#1](https://github.com/Heretikio/herdr-wake/issues/1))
 - **Flaky staggered-start test on macOS CI.** Start slots are fixed times, so one late start on a busy runner shortened the next gap below the test's floor. The test now requires each gap to clear half the stagger and the average to come within 10% of it. ([#2](https://github.com/Heretikio/herdr-wake/issues/2))
+
+### Known issues
+
+- **Codex 0.169 confirms a resume only at the first prompt.** It runs its start hook when the first message is sent, so after a reboot a resumed Codex is listed as unconfirmed until you type in it. Codex itself is back with its session. See [docs/LIMITS.md](docs/LIMITS.md).
+
+### Tested
+
+- Real reboot on macOS arm64 with real Codex 0.169: recorded, resumed into its session after the reboot. Record in [docs/TEST_RESULTS.md](docs/TEST_RESULTS.md).
 
 ## [0.1.0] - 2026-11-10
 

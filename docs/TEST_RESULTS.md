@@ -2,6 +2,23 @@
 
 Dated record of what has actually been run. Newest first. Anything not listed here has not been tested.
 
+## 2026-11-14: macOS reboot, real Codex 0.169 (herdr-wake 0.1.1)
+
+**Machine and versions:** the same Apple silicon Mac as below (macOS 27.2, FileVault off, auto-login off), herdr-core 0.1.18, Codex CLI 0.169.0 (Homebrew cask, signed in with ChatGPT), herdr-wake 0.1.1 built from commit f868179 plus the version bump.
+
+**Recording (issue #1):** Codex started in a kept herdr-core terminal in a new git folder; the herdr-wake hook was trusted in `/hooks`. The session's rollout says `source: "vscode"`, `originator: "codex-tui"`, the exact case 0.1.0 ignored as non-interactive. 0.1.1 logged `hook codex start: recorded` and `status` showed the terminal running with the session id. The hook fired at the first prompt, not when Codex opened (checked again in a second fresh terminal: nothing after 25 s idle, the hook ran at the first message).
+
+**Reboot:** the owner rebooted the Mac and did not log in at its screen.
+
+| Time after boot | Event |
+|---|---|
+| 12 s | a client connection (`herdr-core connect`) started herdr-core |
+| 12 s | `codex resume <id>` started in the recorded terminal; Codex came back with the earlier conversation |
+| 42 s | log: `resume unconfirmed: the agent did not report session ... within 30 s` |
+| 58 s | first prompt sent; the hook ran (`hook codex start: recorded`); `status` showed the terminal live, tries 0 |
+
+**Result:** Codex resumed into its session. The confirmation arrives only at the first prompt because of when Codex 0.169 runs its start hook, so the resume shows as unconfirmed until then (added to [LIMITS.md](LIMITS.md)).
+
 ## 2026-11-10: macOS reboot with the phone app connecting first (owner-reported)
 
 **Machine and versions:** the same Apple silicon Mac as below (macOS 27.2, auto-login off, herdr-core 0.1.18, Claude Code 2.1.322), herdr-wake 0.1.0 at commit a4da220.
