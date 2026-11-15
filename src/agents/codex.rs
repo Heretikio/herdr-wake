@@ -30,8 +30,9 @@
 //! means a Codex nested in another Codex's tool shell. When the session's
 //! rollout (`$CODEX_HOME/sessions/**/rollout-<ts>-<uuid>.jsonl`) exists and
 //! is plain JSONL, its first line (`session_meta`) must have `source` `cli`
-//! (or another plain string that is not `exec`, `vscode` or `mcp`) and
-//! `thread_source` `user` or absent. Compressed rollouts (`.jsonl.zst`) and
+//! (or another plain string that is not `exec` or `mcp`; `vscode` only with a
+//! terminal `originator`, because Codex 0.167 labels its TUI sessions
+//! `vscode`) and `thread_source` `user` or absent. Compressed rollouts (`.jsonl.zst`) and
 //! rollouts not yet written skip this check.
 //!
 //! **Resuming.** `codex resume <flags> <id>` in the recorded folder, with
@@ -140,7 +141,7 @@ fn rollout_name_matches(name: &str, id: &str) -> Option<bool> {
 enum Origin {
     /// A user's thread, or nothing to tell otherwise.
     User,
-    /// `codex exec`, the IDE extension or an MCP client.
+    /// `codex exec`, the IDE extension, the desktop app or an MCP client.
     NonInteractive,
     /// A sub-agent, review, guardian or other thread Codex started itself.
     SubAgent,
@@ -169,8 +170,17 @@ fn rollout_origin(path: &Path) -> Origin {
     let Some(meta) = v.get("payload") else {
         return Origin::User;
     };
+    let terminal = meta
+        .get("originator")
+        .and_then(|o| o.as_str())
+        .is_some_and(is_terminal_originator);
     match meta.get("source") {
-        Some(serde_json::Value::String(s)) if matches!(s.as_str(), "exec" | "vscode" | "mcp") => {
+        Some(serde_json::Value::String(s)) if matches!(s.as_str(), "exec" | "mcp") => {
+            return Origin::NonInteractive
+        }
+        // Codex 0.167 labels its own TUI sessions `vscode`; only the
+        // originator tells the terminal client from the IDE or desktop app.
+        Some(serde_json::Value::String(s)) if s == "vscode" && !terminal => {
             return Origin::NonInteractive
         }
         Some(serde_json::Value::Object(_)) => return Origin::SubAgent,
@@ -180,6 +190,14 @@ fn rollout_origin(path: &Path) -> Origin {
         Some(serde_json::Value::String(s)) if s != "user" => Origin::SubAgent,
         _ => Origin::User,
     }
+}
+
+/// Whether a rollout `originator` is the Codex terminal client
+/// (`codex-tui`, or `codex_cli_rs` in older builds), ignoring case and
+/// `-` versus `_`.
+fn is_terminal_originator(originator: &str) -> bool {
+    let o = originator.to_ascii_lowercase().replace('_', "-");
+    matches!(o.as_str(), "codex-tui" | "codex-cli-rs")
 }
 
 fn basename(s: &str) -> &str {

@@ -256,6 +256,7 @@ fn thread_id_equal_to_the_session_is_not_nested() {
 fn non_interactive_and_sub_agent_rollouts_are_ignored() {
     for (name, reason) in [
         ("rollout-exec.jsonl", "non-interactive"),
+        ("rollout-desktop.jsonl", "non-interactive"),
         ("rollout-subagent.jsonl", "sub-agent"),
         ("rollout-guardian.jsonl", "sub-agent"),
     ] {
@@ -278,6 +279,28 @@ fn a_cli_rollout_is_accepted_and_becomes_the_session_file() {
     f.env
         .insert("CODEX_HOME".into(), codex_home.display().to_string());
     let path = put_rollout(&codex_home, ID, &fixture("rollout-cli.jsonl"), false);
+    add_terminal(&mut f, "t1", "/home/u/proj", 101, &["codex"]);
+    let o = Codex.observe(
+        "start",
+        fixture("session-start-startup.json").as_bytes(),
+        &mut f.ctx(),
+    );
+    match o {
+        Observation::Started { session_file, .. } => assert_eq!(session_file, Some(path)),
+        other => panic!("expected Started, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_tui_rollout_labelled_vscode_is_accepted() {
+    // Codex 0.167 writes `source: "vscode"` for its own terminal sessions.
+    let (mut f, _dir) = Fixture::with_temp_home();
+    let path = put_rollout(
+        &f.home.join(".codex"),
+        ID,
+        &fixture("rollout-tui-vscode.jsonl"),
+        false,
+    );
     add_terminal(&mut f, "t1", "/home/u/proj", 101, &["codex"]);
     let o = Codex.observe(
         "start",
