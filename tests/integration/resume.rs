@@ -326,12 +326,21 @@ fn six_agents_start_staggered() {
     assert_eq!(seen, all, "each terminal resumed once");
 
     let gaps: Vec<u64> = starts.windows(2).map(|w| w[1].ms - w[0].ms).collect();
-    // The stub stamps its start a little after the wrapper released it, so
-    // allow some slack below the configured stagger.
-    let floor = STAGGER_MS * 3 / 4;
+    // Slots are fixed times, not "the previous start plus the stagger", so a
+    // start that runs late (a busy CI runner oversleeping or spawning slowly)
+    // shortens the gap after it: macOS CI once saw [367, 355, 312, 214, 394].
+    // Each gap only has to clear half the stagger, which still catches agents
+    // starting together, and on average the gaps must come close to it.
+    let floor = STAGGER_MS / 2;
     assert!(
         gaps.iter().all(|g| *g >= floor),
-        "starts closer than the stagger: gaps {gaps:?} ms, floor {floor} ms"
+        "starts closer than half the stagger: gaps {gaps:?} ms, floor {floor} ms"
+    );
+    let mean = gaps.iter().sum::<u64>() / gaps.len() as u64;
+    let mean_floor = STAGGER_MS * 9 / 10;
+    assert!(
+        mean >= mean_floor,
+        "starts closer than the stagger on average: gaps {gaps:?} ms, mean {mean} ms, floor {mean_floor} ms"
     );
     // The first agent's hook confirmed the gate, so the second did not wait
     // out the whole first-alone time.

@@ -4,7 +4,12 @@ All notable changes to herdr-wake. The format follows [Keep a Changelog](https:/
 
 ## [Unreleased]
 
-The first release, 0.1.0, is being prepared. It ships once the real reboot matrix has been run and its results are in the README.
+### Fixed
+
+- **Codex 0.167 sessions were never recorded.** Codex 0.167 labels its own terminal sessions `source: "vscode"`, which herdr-wake read as the IDE extension and skipped as non-interactive. A `vscode` session now counts as interactive when its `originator` is the terminal client (`codex-tui` or `codex_cli_rs`); the IDE extension and the desktop app are still skipped. ([#1](https://github.com/Heretikio/herdr-wake/issues/1))
+- **Flaky staggered-start test on macOS CI.** Start slots are fixed times, so one late start on a busy runner shortened the next gap below the test's floor. The test now requires each gap to clear half the stagger and the average to come within 10% of it. ([#2](https://github.com/Heretikio/herdr-wake/issues/2))
+
+## [0.1.0] - 2026-11-10
 
 ### Added
 
