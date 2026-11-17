@@ -115,7 +115,8 @@ pub fn decide(rec: Option<&Record>, agent: Option<&dyn Agent>, ctx: &mut Ctx) ->
             };
         }
     }
-    let plan = agent.resume_plan(rec, ctx);
+    let program = crate::config::program_for(ctx.cfg, rec.agent.as_str(), ctx.home);
+    let plan = with_program(agent.resume_plan(rec, ctx), program.as_deref());
     // Attempts count per boot: a record that ran out on an earlier boot
     // starts again at 0.
     let used = rec.attempts_on(&ctx.platform.boot_id());
@@ -134,15 +135,27 @@ pub fn decide(rec: Option<&Record>, agent: Option<&dyn Agent>, ctx: &mut Ctx) ->
             reason,
             manual: Some(manual_hint(rec, agent, ctx.cfg)),
         },
-        run => match trust::bin_is_safe(rec.agent, &rec.bin, uid) {
-            Ok(()) => Decision::Resume(run),
-            // No command to paste: it would name the very program that
-            // failed the check.
-            Err(why) => Decision::GiveUp {
-                reason: format!("the recorded program is not safe to run: {why}"),
-                manual: None,
-            },
-        },
+        run => {
+            let check = match &program {
+                Some(p) => trust::configured_program_is_safe(p, uid).map_err(|why| {
+                    format!(
+                        "the program set for {} in programs is not safe to run: {why}",
+                        rec.agent
+                    )
+                }),
+                None => trust::bin_is_safe(rec.agent, &rec.bin, uid)
+                    .map_err(|why| format!("the recorded program is not safe to run: {why}")),
+            };
+            match check {
+                Ok(()) => Decision::Resume(run),
+                // No command to paste: it would name the very program that
+                // failed the check.
+                Err(reason) => Decision::GiveUp {
+                    reason,
+                    manual: None,
+                },
+            }
+        }
     }
 }
 
@@ -157,10 +170,41 @@ pub fn manual_for(rec: &Record, agent: &dyn Agent, ctx: &mut Ctx) -> Option<Stri
         env: record::scrub_env(&rec.env),
         ..rec.clone()
     };
-    Some(match agent.resume_plan(&clean, ctx) {
-        Plan::Run { argv, cwd, .. } => manual_command(&cwd, &argv),
-        Plan::Permanent(_) => manual_hint(&clean, agent, ctx.cfg),
-    })
+    let program = crate::config::program_for(ctx.cfg, rec.agent.as_str(), ctx.home);
+    Some(
+        match with_program(agent.resume_plan(&clean, ctx), program.as_deref()) {
+            Plan::Run { argv, cwd, .. } => manual_command(&cwd, &argv),
+            Plan::Permanent(_) => manual_hint(&clean, agent, ctx.cfg),
+        },
+    )
+}
+
+/// `plan` with its program replaced by `program` (the `programs` setting),
+/// when there is one. The flags and the session stay as the agent rebuilt
+/// them.
+fn with_program(plan: Plan, program: Option<&Path>) -> Plan {
+    match (plan, program) {
+        (
+            Plan::Run {
+                mut argv,
+                env,
+                cwd,
+                before,
+                confirm_within_ms,
+            },
+            Some(p),
+        ) if !argv.is_empty() => {
+            argv[0] = p.to_string_lossy().into_owned();
+            Plan::Run {
+                argv,
+                env,
+                cwd,
+                before,
+                confirm_within_ms,
+            }
+        }
+        (plan, _) => plan,
+    }
 }
 
 /// `s` as one POSIX shell word: bare when it holds only safe characters,

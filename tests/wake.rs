@@ -266,6 +266,157 @@ fn attempts_used_up_gives_up_with_the_plans_command() {
     ));
 }
 
+/// A wrapper script (any name) in a private folder, as a user would set in
+/// `programs`. `mode` is its permission bits.
+fn wrapper(name: &str, mode: u32) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let d = tempfile::tempdir().unwrap().keep();
+    std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let p = d.join(name);
+    std::fs::write(&p, "#!/bin/sh\nexec claude \"$@\"\n").unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+    p
+}
+
+#[test]
+fn a_configured_program_runs_instead_of_the_recorded_one() {
+    let mut f = Fixture::new();
+    let w = wrapper("my-claude", 0o755);
+    f.cfg.programs.insert("claude".into(), w.clone());
+    let a = StubAgent::run(&["/usr/local/bin/claude", "--model", "opus", "--resume", "S1"]);
+    let r = recovered_record(Path::new("/home/u/proj"));
+    match decide_with(&mut f, Some(&r), &a) {
+        Decision::Resume(Plan::Run { argv, .. }) => {
+            let w = w.to_string_lossy().into_owned();
+            assert_eq!(
+                argv,
+                strings(&[w.as_str(), "--model", "opus", "--resume", "S1"])
+            );
+        }
+        d => panic!("expected Resume, got {d:?}"),
+    }
+}
+
+#[test]
+fn a_configured_program_for_another_agent_changes_nothing() {
+    let mut f = Fixture::new();
+    f.cfg
+        .programs
+        .insert("codex".into(), wrapper("my-codex", 0o755));
+    let a = StubAgent::run(&["/usr/local/bin/claude", "--resume", "S1"]);
+    let r = recovered_record(Path::new("/home/u/proj"));
+    match decide_with(&mut f, Some(&r), &a) {
+        Decision::Resume(Plan::Run { argv, .. }) => {
+            assert_eq!(argv, strings(&["/usr/local/bin/claude", "--resume", "S1"]))
+        }
+        d => panic!("expected Resume, got {d:?}"),
+    }
+}
+
+#[test]
+fn an_unsafe_configured_program_gives_up_without_a_command() {
+    for (w, why) in [
+        (
+            wrapper("group-writable", 0o775),
+            "writable by group or others",
+        ),
+        (wrapper("not-executable", 0o644), "not executable"),
+        (PathBuf::from("relative/claude"), "not absolute"),
+        (
+            PathBuf::from("/nonexistent/claude-wrapper"),
+            "does not exist",
+        ),
+    ] {
+        let mut f = Fixture::new();
+        f.cfg.programs.insert("claude".into(), w);
+        let a = StubAgent::run(&["/usr/local/bin/claude", "--resume", "S1"]);
+        let r = recovered_record(Path::new("/home/u/proj"));
+        match decide_with(&mut f, Some(&r), &a) {
+            Decision::GiveUp { reason, manual } => {
+                assert!(
+                    reason.contains("programs") && reason.contains(why),
+                    "{reason}"
+                );
+                assert_eq!(manual, None);
+            }
+            d => panic!("expected GiveUp, got {d:?}"),
+        }
+    }
+}
+
+#[test]
+fn the_manual_command_names_the_configured_program() {
+    let mut f = Fixture::new();
+    let w = wrapper("my-claude", 0o755);
+    f.cfg.programs.insert("claude".into(), w.clone());
+    let a = StubAgent::run(&["/bin/claude", "--resume", "S1"]);
+    let mut r = recovered_record(Path::new("/p"));
+    r.boot_id = f.platform.boot_id();
+    r.attempts = 3;
+    match decide_with(&mut f, Some(&r), &a) {
+        Decision::GiveUp { manual, .. } => {
+            assert_eq!(
+                manual,
+                Some(format!("cd /p && {} --resume S1", w.display()))
+            )
+        }
+        d => panic!("expected GiveUp, got {d:?}"),
+    }
+}
+
+#[test]
+fn programs_are_read_from_the_config_file_with_a_tilde_for_home() {
+    let d = tempfile::tempdir().unwrap();
+    let file = d.path().join("config.toml");
+    std::fs::write(
+        &file,
+        "[programs]\nclaude = \"~/bin/my-claude\"\npi = \"/opt/pi-wrapper\"\n",
+    )
+    .unwrap();
+    let cfg = Config::load(&file).unwrap();
+    let home = Path::new("/home/u");
+    assert_eq!(
+        herdr_wake::config::program_for(&cfg, "claude", home),
+        Some(PathBuf::from("/home/u/bin/my-claude"))
+    );
+    assert_eq!(
+        herdr_wake::config::program_for(&cfg, "pi", home),
+        Some(PathBuf::from("/opt/pi-wrapper"))
+    );
+    assert_eq!(herdr_wake::config::program_for(&cfg, "codex", home), None);
+    // Saving (install does, for real_shell) keeps the section and its
+    // comments, writes only the values, and drops an emptied table.
+    std::fs::write(
+        &file,
+        "# mine\n[programs]\n# the wrapper\nclaude = \"~/bin/my-claude\"\n",
+    )
+    .unwrap();
+    let mut cfg = Config::load(&file).unwrap();
+    cfg.programs
+        .insert("pi".into(), PathBuf::from("/opt/pi-wrapper"));
+    cfg.save(&file).unwrap();
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        text.contains("[programs]\n# the wrapper\nclaude = \"~/bin/my-claude\"")
+            && text.contains("pi = \"/opt/pi-wrapper\""),
+        "{text}"
+    );
+    assert_eq!(Config::load(&file).unwrap().programs.len(), 2);
+    cfg.programs.clear();
+    cfg.save(&file).unwrap();
+    assert!(!std::fs::read_to_string(&file).unwrap().contains("programs"));
+    let new = d.path().join("new.toml");
+    let mut fresh = Config::default();
+    fresh.save(&new).unwrap();
+    assert!(!std::fs::read_to_string(&new).unwrap().contains("programs"));
+    fresh
+        .programs
+        .insert("claude".into(), PathBuf::from("/opt/w"));
+    fresh.save(&new).unwrap();
+    let text = std::fs::read_to_string(&new).unwrap();
+    assert!(text.contains("[programs]\nclaude = \"/opt/w\""), "{text}");
+}
+
 #[test]
 fn attempts_used_up_on_an_earlier_boot_start_again() {
     let mut f = Fixture::new();

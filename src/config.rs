@@ -1,5 +1,6 @@
 //! Settings in `~/.config/herdr-wake/config.toml` (see `paths::config_file`).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
@@ -22,6 +23,13 @@ pub struct Config {
     pub first_alone_ms: u64,
     /// Folders (and everything under them) that never resume.
     pub exclude_dirs: Vec<PathBuf>,
+    /// The program to resume an agent with instead of the one recorded, by
+    /// agent name (`claude`, `codex`, `pi`, `opencode`). For agents started
+    /// through a wrapper (a script that sets up the environment, then runs
+    /// the agent): the resume goes through the wrapper again. An absolute
+    /// path, or one starting with `~/`.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub programs: BTreeMap<String, PathBuf>,
     /// herdr-core's `shell` setting saved at install (None: core's default).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub real_shell: Option<Vec<String>>,
@@ -51,9 +59,20 @@ impl Default for Config {
             stagger_ms: 1500,
             first_alone_ms: 8000,
             exclude_dirs: Vec::new(),
+            programs: BTreeMap::new(),
             real_shell: None,
         }
     }
+}
+
+/// The program `cfg` sets for agent `kind` (see `Config::programs`), with a
+/// leading `~/` read as `home`. `None` when there is none.
+pub fn program_for(cfg: &Config, kind: &str, home: &Path) -> Option<PathBuf> {
+    let p = cfg.programs.get(kind)?;
+    Some(match p.strip_prefix("~") {
+        Ok(rest) if p.to_string_lossy().starts_with("~/") => home.join(rest),
+        _ => p.clone(),
+    })
 }
 
 impl Config {
@@ -84,12 +103,45 @@ impl Config {
         if self.real_shell.is_none() {
             doc.remove("real_shell");
         }
+        if self.programs.is_empty() {
+            doc.remove("programs");
+        }
         for (key, item) in fresh.iter() {
+            // A table (`programs`) is updated entry by entry, so the file
+            // keeps its `[programs]` section and any comments in it.
+            if let (Some(slot), Some(new)) = (doc.get_mut(key), item.as_inline_table()) {
+                if let Some(old) = slot.as_table_like_mut() {
+                    let stale: Vec<String> = old
+                        .iter()
+                        .map(|(k, _)| k.to_string())
+                        .filter(|k| !new.contains_key(k))
+                        .collect();
+                    for k in stale {
+                        old.remove(&k);
+                    }
+                    for (k, v) in new.iter() {
+                        let v = toml_edit::Item::Value(v.clone());
+                        match old.get_mut(k) {
+                            Some(s) => *s = v,
+                            None => {
+                                old.insert(k, v);
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
             match doc.get_mut(key) {
                 Some(slot) => *slot = item.clone(),
-                None => {
-                    doc.insert(key, item.clone());
-                }
+                None => match item.as_inline_table() {
+                    // A new table is written as a `[section]`, like a person would.
+                    Some(t) => {
+                        doc.insert(key, toml_edit::Item::Table(t.clone().into_table()));
+                    }
+                    None => {
+                        doc.insert(key, item.clone());
+                    }
+                },
             }
         }
         crate::private::write(path, doc.to_string().as_bytes())

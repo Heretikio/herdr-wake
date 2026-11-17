@@ -5,7 +5,7 @@
 //! is taken on trust.
 
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::record::AgentKind;
 
@@ -253,6 +253,36 @@ fn program_names(kind: AgentKind) -> &'static [&'static str] {
 /// launchers), or for Claude a file under `claude/versions/` (the native
 /// build) or `claude-code/cli.js` (the npm build).
 pub fn bin_is_safe(kind: AgentKind, bin: &Path, uid: u32) -> Result<(), String> {
+    let real = owned_executable(bin, uid)?;
+    let names = program_names(kind);
+    let named = |p: &Path| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| names.contains(&n))
+    };
+    let shape = kind == AgentKind::Claude && {
+        let s = real.to_string_lossy();
+        s.contains("/claude/versions/") || s.ends_with("/claude-code/cli.js")
+    };
+    if named(bin) || named(&real) || shape {
+        Ok(())
+    } else {
+        Err(format!("it is not {kind}"))
+    }
+}
+
+/// Whether `bin`, a program the user set in their own config
+/// (`Config::programs`), may be run. The same rules as `bin_is_safe` except
+/// the name: a wrapper can be called anything, and the config file is
+/// private to the user, so a label cannot choose it.
+pub fn configured_program_is_safe(bin: &Path, uid: u32) -> Result<(), String> {
+    owned_executable(bin, uid).map(|_| ())
+}
+
+/// `bin` resolved, when it is absolute and leads (through any symlinks) to a
+/// regular, executable file that group and others cannot write and that
+/// `uid` or root owns. `Err` says why not.
+fn owned_executable(bin: &Path, uid: u32) -> Result<PathBuf, String> {
     if !bin.is_absolute() {
         return Err("its path is not absolute".into());
     }
@@ -273,21 +303,7 @@ pub fn bin_is_safe(kind: AgentKind, bin: &Path, uid: u32) -> Result<(), String> 
     if md.uid() != uid && md.uid() != 0 {
         return Err("it is owned by neither you nor root".into());
     }
-    let names = program_names(kind);
-    let named = |p: &Path| {
-        p.file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| names.contains(&n))
-    };
-    let shape = kind == AgentKind::Claude && {
-        let s = real.to_string_lossy();
-        s.contains("/claude/versions/") || s.ends_with("/claude-code/cli.js")
-    };
-    if named(bin) || named(&real) || shape {
-        Ok(())
-    } else {
-        Err(format!("it is not {kind}"))
-    }
+    Ok(real)
 }
 
 #[cfg(test)]

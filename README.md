@@ -361,6 +361,7 @@ Settings live in `~/.config/herdr-wake/config.toml` (or under `$XDG_CONFIG_HOME`
 | `stagger_ms` | `1500` | Gap between agent starts after the first of each kind, in milliseconds. |
 | `first_alone_ms` | `8000` | How long the first agent of each kind starts alone, in milliseconds. The wait ends early once that agent reports in. |
 | `exclude_dirs` | `[]` | Folders (and everything under them) whose sessions are never recorded and never resumed. Absolute paths, or paths starting with `~/`. Whole folder names are compared: `~/private` does not cover `~/private-notes`. |
+| `programs` | none | A table, by agent name (`claude`, `codex`, `pi`, `opencode`): the program to resume that agent with instead of the one recorded. For agents you start through a wrapper script: the resume goes through it again. An absolute path or one starting with `~/`; owned by you or root, executable, not writable by group or others. The resume command keeps the agent's flags and session, only the program changes. See [docs/LIMITS.md](docs/LIMITS.md#records). |
 | `real_shell` | written by install | herdr-core's `shell` setting as it was before install, as a list, for example `["/bin/zsh", "-l"]`. herdr-wake hands over to it. When absent, it uses `$SHELL` as a login shell, then `/bin/sh`. Uninstall puts it back. |
 
 Example:
@@ -369,6 +370,15 @@ Example:
 restore_bypass = false
 exclude_dirs = ["~/scratch", "/home/you/clients/acme"]
 ```
+
+A wrapper that sets things up and then runs Claude Code (for example `~/bin/claude-wrapped`, ending in `exec claude "$@"`):
+
+```toml
+[programs]
+claude = "~/bin/claude-wrapped"
+```
+
+If the wrapper passes Claude a temporary `--settings` file, that file is gone after a reboot: either let the wrapper ignore a `--settings` path that no longer exists, or set `restore_bypass = false`, which drops `--settings` from the resume command.
 
 Run `herdr-wake doctor` after editing. A file that cannot be parsed shows up as `FAIL  config:` with the parser's message. While the file is broken, nothing is resumed (every terminal wakes to a plain shell, with one line in the log) and nothing is recorded: herdr-wake does not fall back to the defaults, because the defaults restore bypass flags.
 
