@@ -5,7 +5,7 @@
 //! is taken on trust.
 
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::record::AgentKind;
 
@@ -253,6 +253,61 @@ fn program_names(kind: AgentKind) -> &'static [&'static str] {
 /// launchers), or for Claude a file under `claude/versions/` (the native
 /// build) or `claude-code/cli.js` (the npm build).
 pub fn bin_is_safe(kind: AgentKind, bin: &Path, uid: u32) -> Result<(), String> {
+    let real = owned_executable(bin, uid)?;
+    let names = program_names(kind);
+    let named = |p: &Path| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| names.contains(&n))
+    };
+    let shape = kind == AgentKind::Claude && {
+        let s = real.to_string_lossy();
+        s.contains("/claude/versions/") || s.ends_with("/claude-code/cli.js")
+    };
+    if named(bin) || named(&real) || shape {
+        Ok(())
+    } else {
+        Err(format!("it is not {kind}"))
+    }
+}
+
+/// Whether `file`, herdr-wake's `config.toml`, is the user's alone, so a
+/// `programs` entry in it was set by the user: the file and its folder are
+/// owned by `uid`, not writable by group or others, and neither is a
+/// symlink. `programs` skips the program-name check on that ground, so a
+/// file anyone else could write is refused. `Err` says why.
+pub fn config_is_private(file: &Path, uid: u32) -> Result<(), String> {
+    let folder = file.parent().unwrap_or(file);
+    for (what, p) in [("the file", file), ("its folder", folder)] {
+        let md = std::fs::symlink_metadata(p).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => format!("{what} does not exist"),
+            _ => format!("{what} cannot be read ({e})"),
+        })?;
+        if md.file_type().is_symlink() {
+            return Err(format!("{what} is a symlink"));
+        }
+        if md.uid() != uid {
+            return Err(format!("{what} is not owned by you"));
+        }
+        if md.mode() & 0o022 != 0 {
+            return Err(format!("{what} is writable by group or others"));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `bin`, a program the user set in their own config
+/// (`Config::programs`), may be run. The same rules as `bin_is_safe` except
+/// the name: a wrapper can be called anything, and the config file is
+/// private to the user, so a label cannot choose it.
+pub fn configured_program_is_safe(bin: &Path, uid: u32) -> Result<(), String> {
+    owned_executable(bin, uid).map(|_| ())
+}
+
+/// `bin` resolved, when it is absolute and leads (through any symlinks) to a
+/// regular, executable file that group and others cannot write and that
+/// `uid` or root owns. `Err` says why not.
+fn owned_executable(bin: &Path, uid: u32) -> Result<PathBuf, String> {
     if !bin.is_absolute() {
         return Err("its path is not absolute".into());
     }
@@ -273,21 +328,7 @@ pub fn bin_is_safe(kind: AgentKind, bin: &Path, uid: u32) -> Result<(), String> 
     if md.uid() != uid && md.uid() != 0 {
         return Err("it is owned by neither you nor root".into());
     }
-    let names = program_names(kind);
-    let named = |p: &Path| {
-        p.file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| names.contains(&n))
-    };
-    let shape = kind == AgentKind::Claude && {
-        let s = real.to_string_lossy();
-        s.contains("/claude/versions/") || s.ends_with("/claude-code/cli.js")
-    };
-    if named(bin) || named(&real) || shape {
-        Ok(())
-    } else {
-        Err(format!("it is not {kind}"))
-    }
+    Ok(real)
 }
 
 #[cfg(test)]
