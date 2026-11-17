@@ -105,17 +105,17 @@ pub fn decide(rec: Option<&Record>, agent: Option<&dyn Agent>, ctx: &mut Ctx) ->
         ..rec.clone()
     };
     let rec = &clean;
+    let program = crate::config::program_for(ctx.cfg, rec.agent.as_str(), ctx.home);
     let uid = trust::current_uid();
     // A folder that is gone is the adapter's to report ("folder missing").
     if std::fs::symlink_metadata(&rec.cwd).is_ok() {
         if let Err(why) = trust::folder_is_safe(&rec.cwd, uid) {
             return Decision::GiveUp {
                 reason: format!("folder is not safe to resume in: {why}"),
-                manual: Some(manual_hint(rec, agent, ctx.cfg)),
+                manual: Some(manual_hint(rec, agent, ctx.cfg, program.as_deref())),
             };
         }
     }
-    let program = crate::config::program_for(ctx.cfg, rec.agent.as_str(), ctx.home);
     let plan = with_program(agent.resume_plan(rec, ctx), program.as_deref());
     // Attempts count per boot: a record that ran out on an earlier boot
     // starts again at 0.
@@ -123,7 +123,7 @@ pub fn decide(rec: Option<&Record>, agent: Option<&dyn Agent>, ctx: &mut Ctx) ->
     if used >= ctx.cfg.attempts {
         let manual = match &plan {
             Plan::Run { argv, cwd, .. } => manual_command(cwd, argv),
-            Plan::Permanent(_) => manual_hint(rec, agent, ctx.cfg),
+            Plan::Permanent(_) => manual_hint(rec, agent, ctx.cfg, program.as_deref()),
         };
         return Decision::GiveUp {
             reason: format!("{used} attempts failed"),
@@ -133,7 +133,7 @@ pub fn decide(rec: Option<&Record>, agent: Option<&dyn Agent>, ctx: &mut Ctx) ->
     match plan {
         Plan::Permanent(reason) => Decision::GiveUp {
             reason,
-            manual: Some(manual_hint(rec, agent, ctx.cfg)),
+            manual: Some(manual_hint(rec, agent, ctx.cfg, program.as_deref())),
         },
         run => {
             let check = match &program {
@@ -174,7 +174,7 @@ pub fn manual_for(rec: &Record, agent: &dyn Agent, ctx: &mut Ctx) -> Option<Stri
     Some(
         match with_program(agent.resume_plan(&clean, ctx), program.as_deref()) {
             Plan::Run { argv, cwd, .. } => manual_command(&cwd, &argv),
-            Plan::Permanent(_) => manual_hint(&clean, agent, ctx.cfg),
+            Plan::Permanent(_) => manual_hint(&clean, agent, ctx.cfg, program.as_deref()),
         },
     )
 }
@@ -230,11 +230,12 @@ fn manual_command(cwd: &Path, argv: &[String]) -> String {
 /// A best-effort resume command from the record alone, for when the agent
 /// has no plan to offer. The stored flags go through the agent's flag
 /// policy again, so nothing it would drop now is printed.
-fn manual_hint(rec: &Record, agent: &dyn Agent, cfg: &Config) -> String {
+fn manual_hint(rec: &Record, agent: &dyn Agent, cfg: &Config, program: Option<&Path>) -> String {
     let bin = rec.bin.to_string_lossy().into_owned();
     let mut launch = vec![bin.clone()];
     launch.extend(rec.flags.iter().cloned());
-    let mut argv = vec![bin];
+    // The `programs` setting names what a resume runs, so the hint names it too.
+    let mut argv = vec![program.map_or(bin, |p| p.to_string_lossy().into_owned())];
     let flags = agent.restorable_flags(&launch, cfg).into_iter();
     match rec.agent {
         AgentKind::Claude => {

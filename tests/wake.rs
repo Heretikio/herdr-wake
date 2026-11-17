@@ -365,6 +365,22 @@ fn the_manual_command_names_the_configured_program() {
 }
 
 #[test]
+fn a_permanent_plan_hint_names_the_configured_program() {
+    let mut f = Fixture::new();
+    let w = wrapper("my-claude", 0o755);
+    f.cfg.programs.insert("claude".into(), w.clone());
+    let a = StubAgent::permanent("session not found");
+    let r = recovered_record(Path::new("/p"));
+    match decide_with(&mut f, Some(&r), &a) {
+        Decision::GiveUp { manual, .. } => {
+            let m = manual.unwrap();
+            assert!(m.starts_with(&format!("cd /p && {} ", w.display())), "{m}");
+        }
+        d => panic!("expected GiveUp, got {d:?}"),
+    }
+}
+
+#[test]
 fn programs_are_read_from_the_config_file_with_a_tilde_for_home() {
     let d = tempfile::tempdir().unwrap();
     let file = d.path().join("config.toml");
