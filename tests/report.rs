@@ -1122,3 +1122,44 @@ fn version_warnings_do_not_make_doctor_fail() {
         "{all:#?}"
     );
 }
+
+#[test]
+fn doctor_lists_programs_and_warns_about_a_name_that_is_not_an_agent() {
+    let (mut f, p) = healthy();
+    common::private_config(&mut f, 0o600, 0o700);
+    let w = common::wrapper("my-claude", 0o755);
+    f.cfg.programs.insert("claude".into(), w.clone());
+    f.cfg.programs.insert("Claude".into(), w.clone());
+    let all = run(&mut f, &p, Os::MacOs);
+    let mine: Vec<&Finding> = all.iter().filter(|x| x.check == "programs").collect();
+    assert_eq!(mine.len(), 2, "{mine:#?}");
+    assert!(mine.iter().any(|x| x.level == Level::Ok
+        && x.detail
+            .contains(&format!("claude resumes through {}", w.display()))));
+    assert!(mine
+        .iter()
+        .any(|x| x.level == Level::Warn && x.detail.contains("`Claude` is not an agent")));
+}
+
+#[test]
+fn doctor_fails_programs_from_a_config_others_can_write() {
+    let (mut f, p) = healthy();
+    common::private_config(&mut f, 0o666, 0o700);
+    f.cfg
+        .programs
+        .insert("claude".into(), common::wrapper("my-claude", 0o755));
+    let c = check(&mut f, &p, Os::MacOs, "programs");
+    assert_eq!(c.level, Level::Fail, "{c:#?}");
+    assert!(
+        c.detail.contains("writable by group or others")
+            && c.detail.contains("none of them is used")
+    );
+}
+
+#[test]
+fn doctor_has_no_programs_line_without_programs() {
+    let (mut f, p) = healthy();
+    assert!(run(&mut f, &p, Os::MacOs)
+        .iter()
+        .all(|x| x.check != "programs"));
+}

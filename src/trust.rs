@@ -271,6 +271,31 @@ pub fn bin_is_safe(kind: AgentKind, bin: &Path, uid: u32) -> Result<(), String> 
     }
 }
 
+/// Whether `file`, herdr-wake's `config.toml`, is the user's alone, so a
+/// `programs` entry in it was set by the user: the file and its folder are
+/// owned by `uid`, not writable by group or others, and neither is a
+/// symlink. `programs` skips the program-name check on that ground, so a
+/// file anyone else could write is refused. `Err` says why.
+pub fn config_is_private(file: &Path, uid: u32) -> Result<(), String> {
+    let folder = file.parent().unwrap_or(file);
+    for (what, p) in [("the file", file), ("its folder", folder)] {
+        let md = std::fs::symlink_metadata(p).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => format!("{what} does not exist"),
+            _ => format!("{what} cannot be read ({e})"),
+        })?;
+        if md.file_type().is_symlink() {
+            return Err(format!("{what} is a symlink"));
+        }
+        if md.uid() != uid {
+            return Err(format!("{what} is not owned by you"));
+        }
+        if md.mode() & 0o022 != 0 {
+            return Err(format!("{what} is writable by group or others"));
+        }
+    }
+    Ok(())
+}
+
 /// Whether `bin`, a program the user set in their own config
 /// (`Config::programs`), may be run. The same rules as `bin_is_safe` except
 /// the name: a wrapper can be called anything, and the config file is

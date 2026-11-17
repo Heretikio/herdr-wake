@@ -544,11 +544,9 @@ pub fn doctor(ctx: &mut Ctx, probes: &dyn Probes) -> Vec<Finding> {
 
 /// Every doctor check, with the OS-specific ones for `os`.
 pub fn doctor_on(os: Os, ctx: &mut Ctx, probes: &dyn Probes) -> Vec<Finding> {
-    let mut out = vec![
-        check_config(ctx, probes),
-        check_core_shell(ctx, probes),
-        check_real_shell(ctx, probes),
-    ];
+    let mut out = vec![check_config(ctx, probes)];
+    out.extend(check_programs(ctx));
+    out.extend([check_core_shell(ctx, probes), check_real_shell(ctx, probes)]);
     let (core, hello) = check_core(ctx);
     out.push(core);
     out.push(check_core_version(hello.as_ref()));
@@ -592,6 +590,61 @@ fn check_config(ctx: &Ctx, probes: &dyn Probes) -> Finding {
             format!("fix the line named above in {shown}, or delete the file to go back to the defaults"),
         ),
     }
+}
+
+/// `programs` in `config.toml`: one line per entry with what a resume would
+/// run, a warning for a name that is not an agent herdr-wake knows (it is
+/// ignored), and a failure when the file is not private (then no entry is
+/// used). Nothing when there are no entries.
+fn check_programs(ctx: &Ctx) -> Vec<Finding> {
+    const C: &str = "programs";
+    if ctx.cfg.programs.is_empty() {
+        return Vec::new();
+    }
+    let uid = crate::trust::current_uid();
+    let config = crate::paths::config_file(ctx.env, ctx.home);
+    if let Err(why) = crate::trust::config_is_private(&config, uid) {
+        return vec![Finding::fail(
+            C,
+            format!(
+                "{} names programs, but {why}: none of them is used",
+                config.display()
+            ),
+            format!(
+                "make {} and its folder yours alone (chmod 600 and 700)",
+                config.display()
+            ),
+        )];
+    }
+    let known: Vec<&str> = crate::record::AgentKind::ALL
+        .iter()
+        .map(|k| k.as_str())
+        .collect();
+    ctx.cfg
+        .programs
+        .keys()
+        .map(|name| {
+            if !known.contains(&name.as_str()) {
+                return Finding::warn(
+                    C,
+                    format!("`{name}` is not an agent herdr-wake knows, so this entry is ignored"),
+                    Some(format!("use one of: {}", known.join(", "))),
+                );
+            }
+            let p = crate::config::program_for(ctx.cfg, name, ctx.home).unwrap_or_default();
+            match crate::trust::configured_program_is_safe(&p, uid) {
+                Ok(()) => Finding::ok(C, format!("{name} resumes through {}", p.display())),
+                Err(why) => Finding::fail(
+                    C,
+                    format!(
+                        "{name}: {} is not safe to run, so {name} is not resumed: {why}",
+                        p.display()
+                    ),
+                    format!("fix {} or remove the entry", p.display()),
+                ),
+            }
+        })
+        .collect()
 }
 
 fn check_core_shell(ctx: &Ctx, probes: &dyn Probes) -> Finding {

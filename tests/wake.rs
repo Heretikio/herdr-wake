@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use common::{agent_bin, sample_record, Fixture};
+use common::{agent_bin, private_config, sample_record, wrapper, Fixture};
 use herdr_wake::agents::{Agent, Ctx, Edit, Observation, Plan};
 use herdr_wake::config::Config;
 use herdr_wake::core::fake::FakeCore;
@@ -266,21 +266,10 @@ fn attempts_used_up_gives_up_with_the_plans_command() {
     ));
 }
 
-/// A wrapper script (any name) in a private folder, as a user would set in
-/// `programs`. `mode` is its permission bits.
-fn wrapper(name: &str, mode: u32) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let d = tempfile::tempdir().unwrap().keep();
-    std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let p = d.join(name);
-    std::fs::write(&p, "#!/bin/sh\nexec claude \"$@\"\n").unwrap();
-    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
-    p
-}
-
 #[test]
 fn a_configured_program_runs_instead_of_the_recorded_one() {
     let mut f = Fixture::new();
+    private_config(&mut f, 0o600, 0o700);
     let w = wrapper("my-claude", 0o755);
     f.cfg.programs.insert("claude".into(), w.clone());
     let a = StubAgent::run(&["/usr/local/bin/claude", "--model", "opus", "--resume", "S1"]);
@@ -294,6 +283,54 @@ fn a_configured_program_runs_instead_of_the_recorded_one() {
             );
         }
         d => panic!("expected Resume, got {d:?}"),
+    }
+}
+
+#[test]
+fn programs_are_used_only_from_a_config_file_that_is_yours_alone() {
+    let cases = [
+        (0o664, 0o700, "the file is writable by group or others"),
+        (0o600, 0o777, "its folder is writable by group or others"),
+    ];
+    for (file_mode, dir_mode, why) in cases {
+        let mut f = Fixture::new();
+        private_config(&mut f, file_mode, dir_mode);
+        f.cfg
+            .programs
+            .insert("claude".into(), wrapper("my-claude", 0o755));
+        let a = StubAgent::run(&["/usr/local/bin/claude", "--resume", "S1"]);
+        let r = recovered_record(Path::new("/home/u/proj"));
+        match decide_with(&mut f, Some(&r), &a) {
+            Decision::GiveUp { reason, manual } => {
+                assert!(
+                    reason.contains("programs in") && reason.contains(why),
+                    "{reason}"
+                );
+                assert_eq!(manual, None);
+            }
+            d => panic!("expected GiveUp, got {d:?}"),
+        }
+    }
+    // A config.toml that is a symlink (to a private file elsewhere) is refused too.
+    let mut f = Fixture::new();
+    let real = private_config(&mut f, 0o600, 0o700);
+    let other = tempfile::tempdir().unwrap().keep();
+    std::fs::create_dir(other.join("herdr-wake")).unwrap();
+    std::os::unix::fs::symlink(&real, other.join("herdr-wake/config.toml")).unwrap();
+    f.env.insert(
+        "XDG_CONFIG_HOME".into(),
+        other.to_string_lossy().into_owned(),
+    );
+    f.cfg
+        .programs
+        .insert("claude".into(), wrapper("my-claude", 0o755));
+    let a = StubAgent::run(&["/usr/local/bin/claude", "--resume", "S1"]);
+    let r = recovered_record(Path::new("/home/u/proj"));
+    match decide_with(&mut f, Some(&r), &a) {
+        Decision::GiveUp { reason, .. } => {
+            assert!(reason.contains("the file is a symlink"), "{reason}")
+        }
+        d => panic!("expected GiveUp, got {d:?}"),
     }
 }
 
@@ -328,6 +365,7 @@ fn an_unsafe_configured_program_gives_up_without_a_command() {
         ),
     ] {
         let mut f = Fixture::new();
+        private_config(&mut f, 0o600, 0o700);
         f.cfg.programs.insert("claude".into(), w);
         let a = StubAgent::run(&["/usr/local/bin/claude", "--resume", "S1"]);
         let r = recovered_record(Path::new("/home/u/proj"));

@@ -133,3 +133,35 @@ impl Fixture {
         }
     }
 }
+
+/// A wrapper script (any name) in a private folder, as a user would set in
+/// `programs`. `mode` is its permission bits.
+#[allow(dead_code)]
+pub fn wrapper(name: &str, mode: u32) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let d = tempfile::tempdir().unwrap().keep();
+    std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let p = d.join(name);
+    std::fs::write(&p, "#!/bin/sh\nexec claude \"$@\"\n").unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+    p
+}
+
+/// A real herdr-wake config folder for `programs` tests: `$XDG_CONFIG_HOME/herdr-wake/config.toml` in a fresh temp
+/// folder, with the given modes (0o600 / 0o700 is private). Sets `XDG_CONFIG_HOME` in the fixture. Returns the file.
+#[allow(dead_code)]
+pub fn private_config(f: &mut Fixture, file_mode: u32, dir_mode: u32) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap().keep();
+    let dir = root.join("herdr-wake");
+    std::fs::create_dir(&dir).unwrap();
+    let file = dir.join("config.toml");
+    std::fs::write(&file, "[programs]\n").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(file_mode)).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(dir_mode)).unwrap();
+    f.env.insert(
+        "XDG_CONFIG_HOME".into(),
+        root.to_string_lossy().into_owned(),
+    );
+    file
+}

@@ -136,13 +136,21 @@ pub fn decide(rec: Option<&Record>, agent: Option<&dyn Agent>, ctx: &mut Ctx) ->
             manual: Some(manual_hint(rec, agent, ctx.cfg, program.as_deref())),
         },
         run => {
+            let config = crate::paths::config_file(ctx.env, ctx.home);
             let check = match &program {
-                Some(p) => trust::configured_program_is_safe(p, uid).map_err(|why| {
-                    format!(
-                        "the program set for {} in programs is not safe to run: {why}",
-                        rec.agent
-                    )
-                }),
+                // `programs` skips the name check because the file is the user's own: make sure it is.
+                Some(p) => trust::config_is_private(&config, uid)
+                    .map_err(|why| {
+                        format!(
+                            "programs in {} is not used: {why} (only a config.toml that is yours alone may name a program)",
+                            config.display()
+                        )
+                    })
+                    .and_then(|()| {
+                        trust::configured_program_is_safe(p, uid).map_err(|why| {
+                            format!("the program set for {} in programs is not safe to run: {why}", rec.agent)
+                        })
+                    }),
                 None => trust::bin_is_safe(rec.agent, &rec.bin, uid)
                     .map_err(|why| format!("the recorded program is not safe to run: {why}")),
             };
