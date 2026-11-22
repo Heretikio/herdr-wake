@@ -335,6 +335,46 @@ fn programs_are_used_only_from_a_config_file_that_is_yours_alone() {
 }
 
 #[test]
+fn a_step_before_the_resume_that_runs_the_recorded_program_still_checks_it() {
+    // OpenCode v2 starts its service with the recorded program before the
+    // resume; `programs` replaces only the resume command itself.
+    for (bin_mode, resumes) in [(0o775, false), (0o755, true)] {
+        let mut f = Fixture::new();
+        private_config(&mut f, 0o600, 0o700);
+        let w = wrapper("my-claude", 0o755);
+        f.cfg.programs.insert("claude".into(), w.clone());
+        let mut r = recovered_record(Path::new("/home/u/proj"));
+        if !resumes {
+            r.bin = wrapper("claude", bin_mode);
+        }
+        let bin = r.bin.to_string_lossy().into_owned();
+        let a = StubAgent {
+            plan: Plan::Run {
+                argv: strings(&[bin.as_str(), "--resume", "S1"]),
+                env: BTreeMap::new(),
+                cwd: PathBuf::new(),
+                before: vec![strings(&[bin.as_str(), "service", "start"])],
+                confirm_within_ms: None,
+            },
+            panic: false,
+        };
+        match decide_with(&mut f, Some(&r), &a) {
+            Decision::GiveUp { reason, manual } if !resumes => {
+                assert!(
+                    reason.contains("a step before the resume") && reason.contains("writable"),
+                    "{reason}"
+                );
+                assert_eq!(manual, None);
+            }
+            Decision::Resume(Plan::Run { argv, .. }) if resumes => {
+                assert_eq!(argv[0], w.to_string_lossy());
+            }
+            d => panic!("bin mode {bin_mode:o}: unexpected {d:?}"),
+        }
+    }
+}
+
+#[test]
 fn a_configured_program_for_another_agent_changes_nothing() {
     let mut f = Fixture::new();
     f.cfg

@@ -150,6 +150,19 @@ pub fn decide(rec: Option<&Record>, agent: Option<&dyn Agent>, ctx: &mut Ctx) ->
                         trust::configured_program_is_safe(p, uid).map_err(|why| {
                             format!("the program set for {} in programs is not safe to run: {why}", rec.agent)
                         })
+                    })
+                    .and_then(|()| {
+                        // `programs` replaces only the main command: a step
+                        // before it that runs the recorded program (OpenCode
+                        // v2 starts its service) still needs that program's
+                        // own check.
+                        if runs_recorded_before(&run, rec) {
+                            trust::bin_is_safe(rec.agent, &rec.bin, uid).map_err(|why| {
+                                format!("the recorded program, which a step before the resume runs, is not safe to run: {why}")
+                            })
+                        } else {
+                            Ok(())
+                        }
                     }),
                 None => trust::bin_is_safe(rec.agent, &rec.bin, uid)
                     .map_err(|why| format!("the recorded program is not safe to run: {why}")),
@@ -185,6 +198,13 @@ pub fn manual_for(rec: &Record, agent: &dyn Agent, ctx: &mut Ctx) -> Option<Stri
             Plan::Permanent(_) => manual_hint(&clean, agent, ctx.cfg, program.as_deref()),
         },
     )
+}
+
+/// Whether `plan` runs the recorded program in a `before` step.
+fn runs_recorded_before(plan: &Plan, rec: &Record) -> bool {
+    let bin = rec.bin.to_string_lossy();
+    matches!(plan, Plan::Run { before, .. }
+        if before.iter().any(|c| c.first().is_some_and(|a| *a == bin)))
 }
 
 /// `plan` with its program replaced by `program` (the `programs` setting),
