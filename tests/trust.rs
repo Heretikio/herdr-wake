@@ -250,3 +250,32 @@ fn a_program_others_can_write_or_someone_else_owns_is_refused() {
     let why = bin_is_safe(AgentKind::Claude, &p, current_uid() + 1).unwrap_err();
     assert!(why.contains("owned"), "{why}");
 }
+
+#[test]
+fn group_members_are_read_from_a_misaligned_array() {
+    // The array of member pointers at an odd offset, as getgrgid_r can leave
+    // it on macOS.
+    let a = std::ffi::CString::new("alice").unwrap();
+    let b = std::ffi::CString::new("bob").unwrap();
+    let ptrs: [*mut libc::c_char; 3] = [
+        a.as_ptr() as *mut _,
+        b.as_ptr() as *mut _,
+        std::ptr::null_mut(),
+    ];
+    let size = std::mem::size_of_val(&ptrs);
+    let mut buf = vec![0u8; size + 3];
+    let off = (1..=3)
+        .find(|o| {
+            !(buf.as_ptr() as usize + o).is_multiple_of(std::mem::align_of::<*mut libc::c_char>())
+        })
+        .unwrap();
+    // SAFETY: `buf` has room for the array at `off`; the bytes are copied as is.
+    unsafe {
+        std::ptr::copy_nonoverlapping(ptrs.as_ptr().cast::<u8>(), buf.as_mut_ptr().add(off), size)
+    };
+    let p = unsafe { buf.as_mut_ptr().add(off) }.cast::<*mut libc::c_char>();
+    // SAFETY: a NULL-terminated array of valid C strings (a, b outlive the call).
+    let names = unsafe { herdr_wake::trust::member_names(p) };
+    assert_eq!(names, vec!["alice".to_string(), "bob".to_string()]);
+    assert!(unsafe { herdr_wake::trust::member_names(std::ptr::null_mut()) }.is_empty());
+}

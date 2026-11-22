@@ -148,11 +148,25 @@ fn group_name_and_members(gid: u32) -> Option<(String, Vec<String>)> {
         .to_str()
         .ok()?
         .to_string();
+    // SAFETY: gr_mem is NULL or a NULL-terminated array of NUL-terminated
+    // strings inside `buf`.
+    let members = unsafe { member_names(grp.gr_mem) };
+    Some((name, members))
+}
+
+/// The names in `gr_mem`, a NULL-terminated array of C strings. The array
+/// is read without assuming it is aligned: on macOS, `getgrgid_r` can place
+/// it at an odd offset in the caller's buffer (seen with a directory-service
+/// group), and a plain read there is undefined behaviour (a debug build
+/// aborts with "misaligned pointer dereference").
+///
+/// # Safety
+/// `p` must be NULL or point to a NULL-terminated array of pointers to
+/// NUL-terminated strings, all valid for reads.
+pub unsafe fn member_names(mut p: *mut *mut libc::c_char) -> Vec<String> {
     let mut members = Vec::new();
-    let mut p = grp.gr_mem;
     while !p.is_null() {
-        // SAFETY: gr_mem is a NULL-terminated array of NUL-terminated strings.
-        let m = unsafe { *p };
+        let m = unsafe { p.read_unaligned() };
         if m.is_null() {
             break;
         }
@@ -163,7 +177,7 @@ fn group_name_and_members(gid: u32) -> Option<(String, Vec<String>)> {
         );
         p = unsafe { p.add(1) };
     }
-    Some((name, members))
+    members
 }
 
 /// Whether `id` may be used as a session id: 1 to 128 characters from
