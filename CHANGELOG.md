@@ -4,6 +4,10 @@ All notable changes to herdr-wake. The format follows [Keep a Changelog](https:/
 
 ## [Unreleased]
 
+### Added
+
+- **Resume through a wrapper.** `programs` in `config.toml` sets, per agent, the program to resume with instead of the recorded one, for agents started through a wrapper script (one that sets up the environment, then runs the agent). It must be owned by you or root, executable and not writable by group or others; its name is not checked, so `programs` is used only while `config.toml` and its folder are yours alone. `doctor` lists each entry and warns about a name that is not an agent. The flags and the session id are rebuilt as before.
+
 ## [0.1.1] - 2026-11-14
 
 ### Fixed
