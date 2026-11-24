@@ -272,13 +272,21 @@ fn resurrect_print_gives_the_command_for_a_journaled_session() {
         .join(".claude/projects")
         .join(herdr_wake::agents::claude::project_dir_name(work.path()));
     std::fs::create_dir_all(&projects).unwrap();
+    let transcript = projects.join(format!("{id}.jsonl"));
     std::fs::write(
-        projects.join(format!("{id}.jsonl")),
+        &transcript,
         serde_json::json!({"type":"user","cwd":work.path(),"message":{"role":"user","content":"hi"}})
             .to_string()
             + "\n",
     )
     .unwrap();
+    // A session file written in the last two minutes counts as running.
+    std::fs::File::options()
+        .write(true)
+        .open(&transcript)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+        .unwrap();
     let mut rec = herdr_wake::record::Record::new(
         herdr_wake::record::AgentKind::Claude,
         id,

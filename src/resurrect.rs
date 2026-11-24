@@ -29,6 +29,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -90,6 +91,9 @@ pub struct Row {
     pub bypass: bool,
     /// True when the session is running now.
     pub open: bool,
+    /// When the agent's own session file was last written, in
+    /// milliseconds; 0 when there is none to look at.
+    pub transcript_mtime_ms: u64,
 }
 
 impl Row {
@@ -153,15 +157,32 @@ pub fn claude_mode_flags(mode: Option<&str>) -> Vec<String> {
 pub struct OpenSet {
     ids: BTreeSet<(AgentKind, String)>,
     argv: Vec<(AgentKind, Vec<String>)>,
+    /// Codex thread ids whose rollout file a running Codex holds open.
+    codex_threads: BTreeSet<String>,
+    /// Whether herdr-core answered.
+    pub core_up: bool,
+}
+
+/// A session whose own file was written this recently counts as running:
+/// an agent writes its transcript as it goes, and nothing here can see an
+/// agent that runs outside Herdr.
+pub const FRESH_MS: u64 = 120_000;
+
+/// True when a session file last written at `mtime_ms` (0: unknown) counts
+/// as being written now, at `now_ms`.
+pub fn is_fresh(now_ms: u64, mtime_ms: u64) -> bool {
+    mtime_ms > 0 && now_ms.saturating_sub(mtime_ms) < FRESH_MS
 }
 
 impl OpenSet {
     /// True when the session is among the running ones: named by a
-    /// running record or session file, or by the command line of a running
-    /// agent of the same kind (a word equal to the id, or for ids of 16
-    /// characters or more, containing it: Pi names a file after its id).
+    /// running record or session file, held open by a running Codex, or
+    /// named by the command line of a running agent of the same kind (a
+    /// word equal to the id, or for ids of 16 characters or more, containing
+    /// it: Pi names a file after its id).
     pub fn contains(&self, agent: AgentKind, id: &str) -> bool {
         self.ids.contains(&(agent, id.to_string()))
+            || (agent == AgentKind::Codex && self.codex_threads.contains(id))
             || self.argv.iter().any(|(kind, words)| {
                 *kind == agent
                     && words
@@ -181,11 +202,22 @@ struct ClaudeSession {
 }
 
 /// Finds the running sessions: `Running` records on live terminals and the
-/// agents in their foreground (only when core answers), and Claude's own
-/// session files whose process is alive and is claude.
-pub fn open_sessions(ctx: &mut Ctx, claude_dirs: &BTreeSet<PathBuf>) -> OpenSet {
+/// agents in their foreground (only when core answers), Claude's own
+/// session files whose process is alive and is claude, and the rollout
+/// files a running Codex has open.
+pub fn open_sessions(ctx: &mut Ctx, tools: &dyn Tools, claude_dirs: &BTreeSet<PathBuf>) -> OpenSet {
     let mut open = OpenSet::default();
+    for file in tools.codex_open_files() {
+        if let Some(id) = file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(transcripts::rollout_thread)
+        {
+            open.codex_threads.insert(id.to_string());
+        }
+    }
     if let Ok(terminals) = ctx.core.list(false) {
+        open.core_up = true;
         for t in terminals {
             if let Some(rec) = record::of_terminal(&t).filter(|r| r.state == State::Running) {
                 open.ids.insert((rec.agent, rec.session_id));
@@ -263,9 +295,28 @@ fn entry_transcript(
     }
 }
 
+/// What `collect` found.
+pub struct Collected {
+    /// Every session that could be listed, open ones flagged, newest first.
+    pub rows: Vec<Row>,
+    /// Whether herdr-core answered (without it, running sessions are found
+    /// less well).
+    pub core_up: bool,
+}
+
+/// When `path`, a file, was last written, in milliseconds; 0 when it
+/// cannot be seen.
+fn file_mtime_ms(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
 /// Every session known to herdr-wake that could be listed (open ones
 /// flagged), newest first: the journal, then transcripts the journal lacks.
-pub fn collect(ctx: &mut Ctx) -> Vec<Row> {
+pub fn collect(ctx: &mut Ctx, tools: &dyn Tools) -> Collected {
     let mut cache = Cache::load(&paths::transcript_cache_file(ctx.env, ctx.home));
     let journal = history::read_all(&paths::history_dir(ctx.env, ctx.home));
     let mut rows: Vec<Row> = Vec::new();
@@ -303,7 +354,9 @@ pub fn collect(ctx: &mut Ctx) -> Vec<Row> {
             }
             _ => {}
         }
+        let transcript_mtime_ms = path.as_deref().map_or(0, file_mtime_ms);
         rows.push(Row {
+            transcript_mtime_ms,
             last_ms: e.last_ms().max(found.map_or(0, |f| f.mtime_ms)),
             bypass: has_bypass(e.agent, &e.flags, ctx.cfg),
             entry: e,
@@ -355,16 +408,20 @@ pub fn collect(ctx: &mut Ctx) -> Vec<Row> {
     }
     let _ = cache.save(&paths::transcript_cache_file(ctx.env, ctx.home));
 
-    let open = open_sessions(ctx, &claude_dirs);
+    let open = open_sessions(ctx, tools, &claude_dirs);
+    let now = ctx.platform.now_ms();
     for r in &mut rows {
-        r.open = open.contains(r.agent(), r.id());
+        r.open = open.contains(r.agent(), r.id()) || is_fresh(now, r.transcript_mtime_ms);
     }
     rows.sort_by(|a, b| {
         b.last_ms
             .cmp(&a.last_ms)
             .then_with(|| a.entry.session_id.cmp(&b.entry.session_id))
     });
-    rows
+    Collected {
+        rows,
+        core_up: open.core_up,
+    }
 }
 
 fn transcript_row(
@@ -393,6 +450,7 @@ fn transcript_row(
         },
         title: f.meta.title().map(str::to_string),
         last_ms: f.mtime_ms,
+        transcript_mtime_ms: f.mtime_ms,
         source: Source::Transcript,
         transcript: Transcript::Present,
         flags_from_transcript: true,
@@ -966,6 +1024,7 @@ pub fn run_ticket(
         flags_from_transcript: false,
         bypass: false,
         open: false,
+        transcript_mtime_ms: 0,
         entry: ticket.entry,
     };
     let mut core = crate::report::NoCore;
@@ -1022,47 +1081,201 @@ pub fn run_entry(platform: &dyn Platform, env: BTreeMap<String, String>, key: &s
 
 // ------------------------------------------------------ opening a terminal
 
-/// The two outside programs resurrect asks for help, for tests to replace.
+/// The outside programs resurrect asks for help, for tests to replace.
 pub trait Tools {
     /// The output of `herdr-app ls`, when it works (the desktop app is open).
     fn herdr_app_ls(&self) -> Option<String>;
     /// Runs `hc` with `args`. `Ok` is what it printed, `Err` why it failed.
     fn hc(&self, args: &[String]) -> Result<String, String>;
+    /// The rollout files that a running Codex has open.
+    fn codex_open_files(&self) -> Vec<PathBuf>;
 }
 
-/// `Tools` on the real machine: `herdr-app` and `hc` as found on `PATH`.
+/// How long `hc run` may take.
+const HC_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long `herdr-app ls` may take.
+const HERDR_APP_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long `lsof` may take.
+const LSOF_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// What a finished command printed.
+struct Captured {
+    code: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+/// Runs `program` with `args` and stdin closed, at most `timeout`: the
+/// process is killed after that, and `None` comes back.
+fn run_capture(program: &Path, args: &[String], timeout: Duration) -> Option<Captured> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::Instant;
+
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let mut out = child.stdout.take()?;
+    let mut err = child.stderr.take()?;
+    let out = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = (&mut out).take(16 * 1024 * 1024).read_to_end(&mut bytes);
+        bytes
+    });
+    let err = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = (&mut err).take(1024 * 1024).read_to_end(&mut bytes);
+        bytes
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    Some(Captured {
+        code: status.code(),
+        stdout: String::from_utf8_lossy(&out.join().unwrap_or_default()).into_owned(),
+        stderr: String::from_utf8_lossy(&err.join().unwrap_or_default()).into_owned(),
+    })
+}
+
+/// `Tools` on the real machine.
 pub struct SystemTools {
     pub env: BTreeMap<String, String>,
 }
 
+impl SystemTools {
+    /// `name` as found on `PATH`, when it passes the same check a
+    /// configured program does: a regular executable file that you or root
+    /// own and that group and others cannot write.
+    fn program(&self, name: &str) -> Result<PathBuf, String> {
+        let found = agents::on_path(name, &self.env)
+            .ok_or_else(|| format!("cannot find {name} on PATH"))?;
+        trust::configured_program_is_safe(&found, trust::current_uid())
+            .map_err(|why| format!("{name} at {} is not safe to run: {why}", found.display()))?;
+        Ok(found)
+    }
+}
+
 impl Tools for SystemTools {
     fn herdr_app_ls(&self) -> Option<String> {
-        let app = agents::on_path("herdr-app", &self.env)?;
-        let app = app.to_string_lossy().into_owned();
-        let out = crate::report::Probes::run(
-            &crate::report::SystemProbes,
-            &[app.as_str(), "ls"],
-            std::time::Duration::from_secs(3),
-        )?;
+        let app = self.program("herdr-app").ok()?;
+        let out = run_capture(&app, &["ls".to_string()], HERDR_APP_TIMEOUT)?;
         (out.code == Some(0)).then_some(out.stdout)
     }
 
     fn hc(&self, args: &[String]) -> Result<String, String> {
-        let hc = agents::on_path("hc", &self.env)
-            .ok_or("cannot find hc on PATH (herdr-core's command)")?;
-        let out = std::process::Command::new(hc)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .output()
-            .map_err(|e| format!("cannot run hc: {e}"))?;
-        if out.status.success() {
-            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        let hc = self.program("hc")?;
+        let out = run_capture(&hc, args, HC_TIMEOUT)
+            .ok_or_else(|| format!("hc did not finish within {} s", HC_TIMEOUT.as_secs()))?;
+        if out.code == Some(0) {
+            Ok(out.stdout)
         } else {
-            let err = String::from_utf8_lossy(&out.stderr);
-            let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+            let first = out
+                .stderr
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("");
             Err(format!("hc failed: {}", trust::printable(first)))
         }
     }
+
+    fn codex_open_files(&self) -> Vec<PathBuf> {
+        if cfg!(target_os = "linux") {
+            return proc_open_rollouts(Path::new("/proc"));
+        }
+        let lsof = Path::new("/usr/sbin/lsof");
+        if trust::configured_program_is_safe(lsof, trust::current_uid()).is_err() {
+            return Vec::new();
+        }
+        let args = ["-w", "-Fn", "-c", "/^codex/i"].map(str::to_string);
+        run_capture(lsof, &args, LSOF_TIMEOUT)
+            .map(|out| parse_lsof(&out.stdout))
+            .unwrap_or_default()
+    }
+}
+
+/// The rollout files in `lsof -Fn` output: the `n` lines naming a
+/// `rollout-*.jsonl` file.
+pub fn parse_lsof(output: &str) -> Vec<PathBuf> {
+    output
+        .lines()
+        .filter_map(|l| l.strip_prefix('n'))
+        .map(PathBuf::from)
+        .filter(|p| is_rollout(p))
+        .collect()
+}
+
+fn is_rollout(p: &Path) -> bool {
+    p.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| transcripts::rollout_thread(n).is_some())
+}
+
+/// The rollout files open in the `fd` folders of the Codex processes under
+/// `proc_root` (`/proc` on Linux): a process counts when its program, or the
+/// script an interpreter runs, is named `codex` in any letter case.
+pub fn proc_open_rollouts(proc_root: &Path) -> Vec<PathBuf> {
+    let Ok(procs) = std::fs::read_dir(proc_root) else {
+        return Vec::new();
+    };
+    let named = |w: &str| {
+        Path::new(w)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.to_ascii_lowercase().starts_with("codex"))
+    };
+    let mut found = Vec::new();
+    for p in procs.flatten() {
+        if !p
+            .file_name()
+            .to_string_lossy()
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+        {
+            continue;
+        }
+        let Ok(cmdline) = std::fs::read(p.path().join("cmdline")) else {
+            continue;
+        };
+        let words: Vec<String> = cmdline
+            .split(|&b| b == 0)
+            .filter(|w| !w.is_empty())
+            .map(|w| String::from_utf8_lossy(w).into_owned())
+            .collect();
+        let is_codex = words.first().is_some_and(|w| named(w))
+            || (words
+                .first()
+                .is_some_and(|w| agents::is_interpreter(Path::new(w)))
+                && words.get(1).is_some_and(|w| named(w)));
+        if !is_codex {
+            continue;
+        }
+        let Ok(fds) = std::fs::read_dir(p.path().join("fd")) else {
+            continue;
+        };
+        for fd in fds.flatten() {
+            if let Ok(target) = std::fs::read_link(fd.path()) {
+                if is_rollout(&target) {
+                    found.push(target);
+                }
+            }
+        }
+    }
+    found
 }
 
 /// The space the new terminal belongs to, by Herdr's `herdr.space` label.

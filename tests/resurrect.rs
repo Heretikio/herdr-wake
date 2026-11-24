@@ -33,6 +33,37 @@ fn real_now() -> u64 {
         .as_millis() as u64
 }
 
+struct FakeTools {
+    ls: Option<String>,
+    hc_out: Result<String, String>,
+    calls: RefCell<Vec<Vec<String>>>,
+    codex_open: Vec<PathBuf>,
+}
+
+impl FakeTools {
+    fn ok(out: &str) -> FakeTools {
+        FakeTools {
+            ls: None,
+            hc_out: Ok(out.to_string()),
+            calls: RefCell::default(),
+            codex_open: Vec::new(),
+        }
+    }
+}
+
+impl Tools for FakeTools {
+    fn herdr_app_ls(&self) -> Option<String> {
+        self.ls.clone()
+    }
+    fn hc(&self, args: &[String]) -> Result<String, String> {
+        self.calls.borrow_mut().push(args.to_vec());
+        self.hc_out.clone()
+    }
+    fn codex_open_files(&self) -> Vec<PathBuf> {
+        self.codex_open.clone()
+    }
+}
+
 struct World {
     f: Fixture,
     work: tempfile::TempDir,
@@ -105,17 +136,26 @@ impl World {
     fn claude_transcript_aged(&self, id: &str, rows: &[serde_json::Value], ago_ms: u64) {
         let path = self.claude_file(id);
         write_lines(&path, rows);
+        self.age(&path, ago_ms);
+    }
+
+    /// Sets a file's modification time to `ago_ms` before the fake now.
+    fn age(&self, path: &Path, ago_ms: u64) {
         let then = UNIX_EPOCH + std::time::Duration::from_millis(self.now - ago_ms);
         std::fs::File::options()
             .write(true)
-            .open(&path)
+            .open(path)
             .unwrap()
             .set_modified(then)
             .unwrap();
     }
 
     fn rows(&mut self) -> Vec<rs::Row> {
-        rs::collect(&mut self.f.ctx())
+        self.collect(&FakeTools::ok("")).rows
+    }
+
+    fn collect(&mut self, tools: &FakeTools) -> rs::Collected {
+        rs::collect(&mut self.f.ctx(), tools)
     }
 }
 
@@ -406,6 +446,107 @@ fn a_running_agent_that_names_the_session_hides_it() {
     let rows = w.rows();
     assert!(row(&rows, D).open);
     assert!(!row(&rows, C).open);
+}
+
+#[test]
+fn a_transcript_written_in_the_last_two_minutes_counts_as_open() {
+    let mut w = World::new();
+    let cwd = w.cwd();
+    w.journal(AgentKind::Claude, A, &[], HOUR, Ending::Quit);
+    w.journal(AgentKind::Claude, B, &[], HOUR, Ending::Quit);
+    w.claude_transcript_aged(A, &[user(&cwd, "just now")], 30_000);
+    w.claude_transcript_aged(B, &[user(&cwd, "a while ago")], 3 * 60_000);
+    // A transcript-only session follows the same rule.
+    w.claude_transcript_aged(C, &[user(&cwd, "only a transcript")], 60_000);
+
+    let rows = w.rows();
+    assert!(row(&rows, A).open);
+    assert!(!row(&rows, B).open);
+    assert!(row(&rows, C).open);
+    let (shown, _) = rs::select(&rows, &Filter::default(), 20);
+    assert_eq!(ids(&shown), [B]);
+}
+
+#[test]
+fn freshness_is_two_minutes_and_unknown_is_not_fresh() {
+    let now = 1_000_000_000;
+    assert!(rs::is_fresh(now, now));
+    assert!(rs::is_fresh(now, now - 119_999));
+    assert!(!rs::is_fresh(now, now - 120_000));
+    assert!(!rs::is_fresh(now, 0));
+    // A file dated in the future (a clock that stepped) counts as fresh.
+    assert!(rs::is_fresh(now, now + 5_000));
+}
+
+#[test]
+fn a_rollout_a_running_codex_holds_open_hides_its_session() {
+    let mut w = World::new();
+    w.journal(AgentKind::Codex, D, &[], HOUR, Ending::Quit);
+    w.journal(AgentKind::Codex, C, &[], HOUR, Ending::Quit);
+    let mut tools = FakeTools::ok("");
+    tools.codex_open = vec![PathBuf::from(format!(
+        "/home/u/.codex/sessions/2026/11/20/rollout-2026-11-20T09-15-02-{D}.jsonl"
+    ))];
+    let rows = w.collect(&tools).rows;
+    assert!(row(&rows, D).open);
+    assert!(!row(&rows, C).open);
+}
+
+#[test]
+fn lsof_output_names_the_rollouts_and_nothing_else() {
+    let out = format!(
+        "p123\nf5\nn/home/u/.codex/sessions/2026/11/20/rollout-2026-11-20T09-15-02-{D}.jsonl\n\
+         f6\nn/home/u/.codex/auth.json\nf7\nn/dev/ttys001\n\
+         p124\nf4\nn/x/rollout-notes.txt\n"
+    );
+    let files = rs::parse_lsof(&out);
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert!(files[0].to_string_lossy().ends_with(&format!("{D}.jsonl")));
+    assert!(rs::parse_lsof("").is_empty());
+}
+
+#[test]
+fn the_proc_scan_finds_rollouts_held_by_codex_processes_only() {
+    let root = tempfile::tempdir().unwrap();
+    let rollout = |id: &str| format!("/h/.codex/sessions/rollout-2026-11-20T09-15-02-{id}.jsonl");
+    let proc = |pid: &str, cmdline: &str, fds: &[&str]| {
+        let d = root.path().join(pid);
+        std::fs::create_dir_all(d.join("fd")).unwrap();
+        std::fs::write(d.join("cmdline"), cmdline).unwrap();
+        for (i, target) in fds.iter().enumerate() {
+            std::os::unix::fs::symlink(target, d.join("fd").join(i.to_string())).unwrap();
+        }
+    };
+    let (x, y, z) = (
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-1111-4111-8111-111111111111",
+        "33333333-1111-4111-8111-111111111111",
+    );
+    // The native program, the script run by node, a different program.
+    proc("100", "codex\0resume\0abc\0", &[&rollout(x), "/dev/null"]);
+    proc(
+        "101",
+        "/usr/bin/node\0/lib/codex/bin/codex.js\0",
+        &[&rollout(y)],
+    );
+    proc("102", "vim\0notes\0", &[&rollout(z)]);
+    std::fs::create_dir_all(root.path().join("self")).unwrap();
+
+    let mut found: Vec<String> = rs::proc_open_rollouts(root.path())
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    found.sort();
+    assert_eq!(found, [rollout(x), rollout(y)]);
+    assert!(rs::proc_open_rollouts(&root.path().join("missing")).is_empty());
+}
+
+#[test]
+fn collect_says_whether_core_answered() {
+    let mut w = World::new();
+    assert!(w.collect(&FakeTools::ok("")).core_up);
+    w.f.core.fail_with(Some(CoreError::NotRunning));
+    assert!(!w.collect(&FakeTools::ok("")).core_up);
 }
 
 // ------------------------------------------------------------- filters
@@ -851,6 +992,7 @@ fn a_relative_config_folder_is_found_under_the_sessions_folder_like_a_resume_doe
         &moved.join(format!("{A}.jsonl")),
         &[user(&cwd, "relative config")],
     );
+    w.age(&moved.join(format!("{A}.jsonl")), 240 * HOUR);
 
     let rows = w.rows();
     let r = row(&rows, A);
@@ -1082,32 +1224,6 @@ fn an_agent_that_cannot_start_leaves_the_manual_command_and_a_shell() {
 
 // ------------------------------------------------------ opening the terminal
 
-struct FakeTools {
-    ls: Option<String>,
-    hc_out: Result<String, String>,
-    calls: RefCell<Vec<Vec<String>>>,
-}
-
-impl FakeTools {
-    fn ok(out: &str) -> FakeTools {
-        FakeTools {
-            ls: None,
-            hc_out: Ok(out.to_string()),
-            calls: RefCell::default(),
-        }
-    }
-}
-
-impl Tools for FakeTools {
-    fn herdr_app_ls(&self) -> Option<String> {
-        self.ls.clone()
-    }
-    fn hc(&self, args: &[String]) -> Result<String, String> {
-        self.calls.borrow_mut().push(args.to_vec());
-        self.hc_out.clone()
-    }
-}
-
 fn strs(v: &[&str]) -> Vec<String> {
     v.iter().map(|s| s.to_string()).collect()
 }
@@ -1199,6 +1315,7 @@ fn outside_herdr_the_space_whose_folder_holds_the_session_is_found() {
         ])),
         hc_out: Ok("t1".into()),
         calls: RefCell::default(),
+        codex_open: Vec::new(),
     };
     // The deepest folder wins: the space whose terminal sits in work/deep.
     let space = rs::find_space(&tools, &mut w.f.core, &w.f.env, &w.f.home, &proj);
@@ -1219,6 +1336,7 @@ fn a_home_or_root_space_holds_only_sessions_exactly_there() {
         ])),
         hc_out: Ok(String::new()),
         calls: RefCell::default(),
+        codex_open: Vec::new(),
     };
     let inside = w.f.home.join("proj");
     std::fs::create_dir_all(&inside).unwrap();
@@ -1257,6 +1375,7 @@ fn an_hc_failure_is_reported() {
         ls: None,
         hc_out: Err("hc failed: nope".into()),
         calls: RefCell::default(),
+        codex_open: Vec::new(),
     };
     let cwd = w.cwd();
     let err = rs::open_terminal(

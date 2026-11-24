@@ -531,7 +531,7 @@ pub fn codex_names(codex_home: &Path) -> BTreeMap<String, String> {
 /// The thread id of a rollout file name
 /// (`rollout-YYYY-MM-DDTHH-MM-SS-<thread>.jsonl`). `None` for other names and
 /// for a child thread's file (`..<thread>_<child>.jsonl`).
-fn rollout_thread(name: &str) -> Option<&str> {
+pub(crate) fn rollout_thread(name: &str) -> Option<&str> {
     let core = name.strip_suffix(".jsonl")?.strip_prefix("rollout-")?;
     if core.get(19..20)? != "-" {
         return None;

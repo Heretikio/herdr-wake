@@ -988,8 +988,9 @@ fn resurrect(a: ResurrectArgs) -> anyhow::Result<i32> {
         agent,
     };
     let mut core = s.core();
-    let up = core.hello().is_ok();
-    let rows = rs::collect(&mut s.ctx(&mut core));
+    let tools = rs::SystemTools { env: s.env.clone() };
+    let collected = rs::collect(&mut s.ctx(&mut core), &tools);
+    let (rows, up) = (collected.rows, collected.core_up);
     let now = s.platform.now_ms();
 
     let open_target = match a.target.as_deref() {
@@ -1051,7 +1052,6 @@ fn resurrect(a: ResurrectArgs) -> anyhow::Result<i32> {
     let key = rs::write_ticket(&s.env, &s.home, now, &launch, a.fork)
         .context("writing the launch ticket")?;
     let exe = std::env::current_exe().context("finding this herdr-wake binary")?;
-    let tools = rs::SystemTools { env: s.env.clone() };
     let opened = rs::open_terminal(&tools, &mut core, &s.env, &s.home, &launch.cwd, &exe, &key)
         .map_err(|e| anyhow!(e))?;
     let what = trust::printable(&format!(

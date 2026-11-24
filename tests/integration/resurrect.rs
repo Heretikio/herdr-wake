@@ -5,6 +5,23 @@ use herdr_wake::record::State;
 
 use crate::harness::Harness;
 
+/// Makes the stub's session file look old: a session file written in the
+/// last two minutes counts as running.
+fn age_session_file(h: &Harness, dir: &std::path::Path, id: &str) {
+    let file = h
+        .home
+        .join(".claude/projects")
+        .join(herdr_wake::agents::claude::project_dir_name(dir))
+        .join(format!("{id}.jsonl"));
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap_or_else(|e| panic!("{}: {e}", file.display()))
+        .set_modified(old)
+        .unwrap();
+}
+
 /// A `PATH` with the stub agents and `hc`, for the commands that look both
 /// up.
 fn path(h: &Harness) -> String {
@@ -48,6 +65,7 @@ fn a_closed_session_is_listed_and_brought_back_in_a_new_terminal() {
         h.record(&t).filter(|r| r.state == State::Ended)
     });
     h.wait_for_shell(&t);
+    age_session_file(&h, &dir, id);
 
     // Closed: listed, with the flags it ran with and the bypass marked.
     let listing = json(&h, &["resurrect", "--json"]);
@@ -119,6 +137,7 @@ fn a_closed_session_is_listed_and_brought_back_in_a_new_terminal() {
         h.record(&s.terminal).filter(|r| r.state == State::Ended)
     });
     h.wait_for_shell(&s.terminal);
+    age_session_file(&h, &dir, id);
     let again = json(&h, &["resurrect", "--json"]);
     assert_eq!(again["sessions"][0]["session_id"], id);
 }
@@ -136,6 +155,7 @@ fn a_session_that_is_not_safe_to_resume_is_refused() {
         h.record(&t).filter(|r| r.state == State::Ended)
     });
     h.wait_for_shell(&t);
+    age_session_file(&h, &dir, id);
 
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
