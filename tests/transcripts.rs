@@ -517,8 +517,8 @@ fn a_title_that_looks_like_a_credential_is_hidden_here_and_in_the_cache() {
     write_lines(
         &f,
         &[
-            user("use this API token abc123 for the deploy"),
-            json!({"type":"ai-title","aiTitle":"Deploy with bearer credentials"}),
+            user("use this API token sk-ant-abcdEFGH1234567890xyz for the deploy"),
+            json!({"type":"ai-title","aiTitle":"Deploy with token=Zx9fQ2mL7pR4tY8w"}),
         ],
     );
     let state = tempfile::tempdir().unwrap();
@@ -531,10 +531,14 @@ fn a_title_that_looks_like_a_credential_is_hidden_here_and_in_the_cache() {
     assert_eq!(m.prompt.as_deref(), Some(transcripts::HIDDEN_TITLE));
     assert_eq!(m.title(), Some(transcripts::HIDDEN_TITLE));
     let cached = std::fs::read_to_string(&cache_file).unwrap();
-    for leak in ["abc123", "API token", "bearer"] {
+    for leak in [
+        "sk-ant-abcdEFGH1234567890xyz",
+        "Zx9fQ2mL7pR4tY8w",
+        "API token",
+    ] {
         assert!(!cached.contains(leak), "{leak} in the cache");
     }
-    assert_eq!(transcripts::CACHE_VERSION, 2);
+    assert_eq!(transcripts::CACHE_VERSION, 3);
 
     // Codex names go the same way.
     let h = tempfile::tempdir().unwrap();
@@ -542,7 +546,7 @@ fn a_title_that_looks_like_a_credential_is_hidden_here_and_in_the_cache() {
         h.path().join("session_index.jsonl"),
         format!(
             "{}\n",
-            json!({"id": ID, "thread_name": "rotate the secret key"})
+            json!({"id": ID, "thread_name": "rotate ghp_ABCdef1234567890ABCDEF12"})
         ),
     )
     .unwrap();
@@ -552,4 +556,31 @@ fn a_title_that_looks_like_a_credential_is_hidden_here_and_in_the_cache() {
             .map(String::as_str),
         Some(transcripts::HIDDEN_TITLE)
     );
+}
+
+#[test]
+fn titles_that_only_talk_about_secrets_stay_visible() {
+    use herdr_wake::trust::text_holds_secret;
+    for ok in [
+        "gateway-authentik",
+        "Wiki and Authentik integration",
+        "keyboard shortcuts for the token limit",
+        "rotate the secret key",
+        "resume f68d420e-eb7e-48bb-9cb3-68ea649a1835",
+        "revert 5a7372613b0c9e1f2d4a6b8c0e1f3a5b7c9d1e2f",
+        "~/git/herdr-wake/src/transcripts.rs",
+        "password reset flow",
+    ] {
+        assert!(!text_holds_secret(ok), "{ok} hidden");
+    }
+    for bad in [
+        "use sk-ant-abcdEFGH1234567890xyz here",
+        "login with password=hunter2",
+        "TOKEN: Zx9fQ2mL7pR4tY8wB3nK6vH1",
+        "export KEY=aB3dE5fG7hJ9kL1mN3pQ5rS7",
+        "github_pat_11ABCDEFG0123456789",
+        "AKIAIOSFODNN7EXAMPLE",
+    ] {
+        assert!(text_holds_secret(bad), "{bad} shown");
+    }
 }

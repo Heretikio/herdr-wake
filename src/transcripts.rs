@@ -32,7 +32,7 @@ use crate::trust;
 
 /// The cache layout version. Change it whenever `Meta` gets a new field or
 /// a parsing rule changes; the old cache is then ignored.
-pub const CACHE_VERSION: u32 = 2;
+pub const CACHE_VERSION: u32 = 3;
 
 /// How much of the start and of the end of a transcript is read.
 const CHUNK: u64 = 128 * 1024;
@@ -220,13 +220,13 @@ fn is_uuid(id: &str) -> bool {
 pub const HIDDEN_TITLE: &str = "(title hidden: looks like a credential)";
 
 /// `text` on one line, whitespace collapsed, at most `TEXT_MAX` characters;
-/// `HIDDEN_TITLE` instead when it looks like it holds a credential (see
-/// `trust::looks_like_credential`), so that never reaches the cache or the
-/// screen.
+/// `HIDDEN_TITLE` instead when it seems to hold a secret value (see
+/// `trust::text_holds_secret`), so that never reaches the cache or the
+/// screen. The whole text is checked, not only the part that is kept.
 fn tidy(text: &str) -> String {
     let one: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let short: String = one.chars().take(TEXT_MAX).collect();
-    if trust::looks_like_credential(&short) {
+    if trust::text_holds_secret(&one) {
         HIDDEN_TITLE.to_string()
     } else {
         short

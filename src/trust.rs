@@ -257,6 +257,77 @@ pub fn looks_like_credential(text: &str) -> bool {
         .any(|w| lower.contains(w))
 }
 
+/// Prefixes of well-known API keys and tokens.
+const SECRET_PREFIXES: [&str; 15] = [
+    "sk-",
+    "sk_",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "github_pat_",
+    "glpat-",
+    "xoxb-",
+    "xoxp-",
+    "xapp-",
+    "AKIA",
+    "ASIA",
+    "AIza",
+    "eyJ",
+];
+
+/// Words that, followed by `=` or `:` and a value, hand over a secret.
+const SECRET_ASSIGNMENTS: [&str; 8] = [
+    "password", "passwd", "pwd", "token", "secret", "api_key", "apikey", "api-key",
+];
+
+/// True when free text (a session title or prompt) seems to hold a secret
+/// value: a word that starts like a known API key or token, an assignment
+/// such as `password=...`, or a long random-looking string of letters and
+/// digits. Words that only talk about secrets ("auth", "keyboard", "token
+/// limits") do not count, and neither do UUIDs, hex hashes or paths.
+pub fn text_holds_secret(text: &str) -> bool {
+    let trim = |w: &str| {
+        w.trim_matches(|c: char| "\"'`,;()[]{}<>".contains(c))
+            .to_string()
+    };
+    text.split_whitespace().map(trim).any(|word| {
+        let lower = word.to_ascii_lowercase();
+        let assigned = SECRET_ASSIGNMENTS.iter().any(|k| {
+            [format!("{k}="), format!("{k}:")]
+                .iter()
+                .any(|p| lower.starts_with(p.as_str()) && lower.len() > p.len())
+        });
+        assigned
+            || word
+                .split(['=', ':'])
+                .map(trim)
+                .any(|part| secret_shaped(&part))
+    })
+}
+
+/// One word that looks like a key or token by its shape.
+fn secret_shaped(part: &str) -> bool {
+    if SECRET_PREFIXES
+        .iter()
+        .any(|p| part.starts_with(p) && part.len() >= p.len() + 12)
+    {
+        return true;
+    }
+    if part.len() < 24 {
+        return false;
+    }
+    let token_chars = part
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "_-+/=.".contains(c));
+    let hex_or_uuid = part.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+    let path_like = part.matches('/').count() > 1 || part.matches('.').count() > 1;
+    let mixed = part.chars().any(|c| c.is_ascii_digit())
+        && part.chars().any(|c| c.is_ascii_lowercase())
+        && part.chars().any(|c| c.is_ascii_uppercase());
+    token_chars && mixed && !hex_or_uuid && !path_like
+}
+
 /// The file names an agent's program goes by.
 fn program_names(kind: AgentKind) -> &'static [&'static str] {
     match kind {
