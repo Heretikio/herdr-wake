@@ -169,6 +169,7 @@ dependencies = [
  "clap",
  "jsonc-parser",
  "libc",
+ "memchr",
  "rustix",
  "serde",
  "serde_json",

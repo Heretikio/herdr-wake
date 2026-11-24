@@ -1,14 +1,18 @@
-//! Reading the agents' own transcripts, for the sessions the history journal
-//! does not know (they ran before herdr-wake was installed, or outside
-//! Herdr). Claude Code and Codex only; Pi and OpenCode are not read yet.
+//! Reading the agents' own session files, for the sessions the history
+//! journal does not know (they ran before herdr-wake was installed, or
+//! outside Herdr): Claude Code and Codex transcripts, Pi's session files and
+//! OpenCode's database (see `opencode_store`).
 //!
-//! Every file is read in two bounded pieces, the first and the last 128 KB,
-//! never whole: the facts wanted sit at the start of a transcript (folder,
-//! first permission mode, first prompt) or near its end (titles). What was
-//! learned about a file is kept in a cache in the state folder, keyed by the
-//! file's size and modification time, so a later run costs one `stat` per
-//! file. The cache holds only the files seen in the latest run, and is
-//! thrown away whenever `CACHE_VERSION` changes.
+//! Titles and the first prompt come from two bounded pieces of a file, the
+//! first and the last 128 KB: those facts sit at the start of a transcript
+//! (folder, first permission mode, first prompt) or near its end (titles).
+//! The details of `facts` (how the conversation ended, cost, branch, models,
+//! pull requests) need the whole file; it is read once, line by line, with a
+//! cheap byte search deciding which lines are parsed at all. What was learned
+//! about a file is kept in a cache in the state folder, keyed by the file's
+//! size and modification time, so a later run costs one `stat` per file. The
+//! cache holds only the files seen in the latest run, and is thrown away
+//! whenever `CACHE_VERSION` changes.
 //!
 //! Sub-agents are left out (Claude's sidechain rows and `subagents` folders,
 //! Codex's child threads), and so are runs that are not interactive
@@ -27,12 +31,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::agents::codex::{self, Origin};
+use crate::facts::{self, flag, str_of, Conversation, Facts};
 use crate::record::AgentKind;
 use crate::trust;
 
 /// The cache layout version. Change it whenever `Meta` gets a new field or
 /// a parsing rule changes; the old cache is then ignored.
-pub const CACHE_VERSION: u32 = 3;
+pub const CACHE_VERSION: u32 = 4;
 
 /// How much of the start and of the end of a transcript is read.
 const CHUNK: u64 = 128 * 1024;
@@ -47,7 +52,7 @@ const MAX_FIRST_LINE: u64 = 1 << 20;
 const MAX_SESSIONS_DEPTH: usize = 4;
 
 /// What was learned about one transcript.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Meta {
     pub agent: AgentKind,
     pub session_id: String,
@@ -61,6 +66,9 @@ pub struct Meta {
     pub prompt: Option<String>,
     /// Claude: the first recorded `permissionMode`.
     pub mode: Option<String>,
+    /// What the whole file says: ending, cost, branch, models, pull requests.
+    #[serde(default)]
+    pub facts: Facts,
 }
 
 impl Meta {
@@ -81,7 +89,7 @@ impl Meta {
 }
 
 /// A transcript with its facts.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Found {
     pub meta: Meta,
     pub path: PathBuf,
@@ -89,7 +97,7 @@ pub struct Found {
     pub mtime_ms: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct CacheEntry {
     size: u64,
     mtime_ms: u64,
@@ -178,23 +186,38 @@ impl Cache {
         }
         let (size, mtime_ms) = (md.len(), mtime_ms(&md));
         let key = path.to_string_lossy().into_owned();
-        self.seen.insert(key.clone());
-        if let Some(e) = self.files.get(&key) {
-            if (e.size, e.mtime_ms) == (size, mtime_ms) {
-                return e.meta.clone().map(|m| (m, mtime_ms));
+        let meta = match self.peek(&key, size, mtime_ms) {
+            Some(found) => found,
+            None => {
+                let meta = parse(path, size);
+                self.store(key, size, mtime_ms, meta.clone());
+                meta
             }
-        }
-        let meta = parse(path, size);
+        };
+        meta.map(|m| (m, mtime_ms))
+    }
+
+    /// What was learned about `key` when it had this size and time: `None`
+    /// when nothing, or something about another size or time. Marks `key` as
+    /// seen in this run.
+    pub(crate) fn peek(&mut self, key: &str, size: u64, mtime_ms: u64) -> Option<Option<Meta>> {
+        self.seen.insert(key.to_string());
+        let e = self.files.get(key)?;
+        ((e.size, e.mtime_ms) == (size, mtime_ms)).then(|| e.meta.clone())
+    }
+
+    /// Remembers what was learned about `key` at this size and time.
+    pub(crate) fn store(&mut self, key: String, size: u64, mtime_ms: u64, meta: Option<Meta>) {
+        self.seen.insert(key.clone());
         self.files.insert(
             key,
             CacheEntry {
                 size,
                 mtime_ms,
-                meta: meta.clone(),
+                meta,
             },
         );
         self.dirty = true;
-        meta.map(|m| (m, mtime_ms))
     }
 }
 
@@ -223,7 +246,7 @@ pub const HIDDEN_TITLE: &str = "(title hidden: looks like a credential)";
 /// `HIDDEN_TITLE` instead when it seems to hold a secret value (see
 /// `trust::text_holds_secret`), so that never reaches the cache or the
 /// screen. The whole text is checked, not only the part that is kept.
-fn tidy(text: &str) -> String {
+pub(crate) fn tidy(text: &str) -> String {
     let one: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let short: String = one.chars().take(TEXT_MAX).collect();
     if trust::text_holds_secret(&one) {
@@ -290,14 +313,6 @@ fn read_lines(path: &Path, size: u64) -> std::io::Result<(Lines, Lines)> {
             .collect()
     };
     Ok((lines(&head), lines(&tail)))
-}
-
-fn str_of<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
-    v.get(key).and_then(Value::as_str)
-}
-
-fn flag(v: &Value, key: &str) -> bool {
-    v.get(key).and_then(Value::as_bool) == Some(true)
 }
 
 /// The text of a user message's content: a string, or the first text block
@@ -429,6 +444,7 @@ fn parse_claude(path: &Path, size: u64) -> Option<Meta> {
         ai_title: facts.ai,
         prompt: facts.prompt,
         mode: facts.mode,
+        facts: crate::fullread::claude_facts(path),
     })
 }
 
@@ -621,6 +637,7 @@ fn parse_codex(path: &Path, _size: u64) -> Option<Meta> {
         ai_title: None,
         prompt,
         mode: None,
+        facts: crate::fullread::codex_facts(path),
     })
 }
 
@@ -665,13 +682,14 @@ pub fn scan_codex(codex_home: &Path, cache: &mut Cache) -> Vec<Found> {
 }
 
 /// The facts of the transcript at `path` of an agent's session, from the
-/// cache or by reading it: `None` for Pi and OpenCode (not read), for a
-/// file that is missing or not a listable session.
+/// cache or by reading it: `None` for OpenCode (its sessions are in a
+/// database), for a file that is missing or not a listable session.
 pub fn meta_of(kind: AgentKind, path: &Path, cache: &mut Cache) -> Option<Found> {
     let parse = match kind {
         AgentKind::Claude => parse_claude as fn(&Path, u64) -> Option<Meta>,
         AgentKind::Codex => parse_codex,
-        AgentKind::Pi | AgentKind::OpenCode => return None,
+        AgentKind::Pi => parse_pi,
+        AgentKind::OpenCode => return None,
     };
     let (meta, mtime_ms) = cache.lookup(path, parse)?;
     Some(Found {
@@ -679,4 +697,135 @@ pub fn meta_of(kind: AgentKind, path: &Path, cache: &mut Cache) -> Option<Found>
         path: path.to_path_buf(),
         mtime_ms,
     })
+}
+
+// ---------------------------------------------------------------------- Pi
+
+/// Pi's session folder: `PI_CODING_AGENT_SESSION_DIR`, else
+/// `${PI_CODING_AGENT_DIR:-~/.pi/agent}/sessions`.
+pub fn pi_dir(env: &BTreeMap<String, String>, home: &Path) -> PathBuf {
+    crate::agents::pi::sessions_root(env, home)
+}
+
+/// What one Pi session file (`<time>_<id>.jsonl`) says. Its first line
+/// names the session and its folder; `None` when it does not look like one.
+/// The file is read whole, one line at a time: Pi's rows are small.
+fn parse_pi(path: &Path, _size: u64) -> Option<Meta> {
+    let mut header: Option<(String, PathBuf, Option<u64>)> = None;
+    let mut bad = false;
+    let mut first = true;
+    let mut name: Option<String> = None;
+    let mut prompt: Option<String> = None;
+    let mut conversation: Option<Conversation> = None;
+    let mut models = BTreeSet::new();
+    let mut cost = 0.0f64;
+    let mut duration: Option<u64> = None;
+    crate::fullread::each_line(path, |_, line| {
+        if bad {
+            return;
+        }
+        let Ok(v) = serde_json::from_slice::<Value>(line) else {
+            bad = first;
+            first = false;
+            return;
+        };
+        if std::mem::take(&mut first) {
+            match (str_of(&v, "type"), str_of(&v, "id"), str_of(&v, "cwd")) {
+                (Some("session"), Some(id), Some(cwd))
+                    if trust::valid_session_id(id) && Path::new(cwd).is_absolute() =>
+                {
+                    header = Some((
+                        id.to_string(),
+                        PathBuf::from(cwd),
+                        str_of(&v, "timestamp").and_then(facts::epoch_ms),
+                    ));
+                }
+                _ => bad = true,
+            }
+            return;
+        }
+        match str_of(&v, "type") {
+            Some("session_info") => {
+                name = str_of(&v, "name").map(tidy).filter(|n| !n.is_empty());
+            }
+            Some("model_change") => {
+                if let Some(m) = str_of(&v, "modelId") {
+                    crate::fullread::add_model(&mut models, m);
+                }
+            }
+            Some("message") => {
+                if let Some(c) = facts::pi_ending(&v) {
+                    conversation = Some(c);
+                }
+                if prompt.is_none() {
+                    if let Some((facts::Role::User, text)) = facts::pi_message(&v) {
+                        prompt = Some(tidy(&text));
+                    }
+                }
+                let message = v.get("message");
+                if let Some(m) = message.filter(|m| str_of(m, "role") == Some("assistant")) {
+                    if let Some(model) = str_of(m, "model") {
+                        crate::fullread::add_model(&mut models, model);
+                    }
+                    cost += facts::number(m.pointer("/usage/cost/total")).unwrap_or(0.0);
+                    if let Some(ms) = facts::whole(m.get("durationMs")) {
+                        duration = Some(duration.unwrap_or(0).saturating_add(ms));
+                    }
+                }
+            }
+            _ => {}
+        }
+    })
+    .ok()?;
+    let (id, cwd, started) = header.filter(|_| !bad)?;
+    Some(Meta {
+        agent: AgentKind::Pi,
+        session_id: id,
+        cwd: Some(cwd),
+        custom_title: name,
+        ai_title: None,
+        prompt,
+        mode: None,
+        facts: Facts {
+            conversation,
+            cost_usd: (cost > 0.0).then_some(cost),
+            duration_ms: duration,
+            started_ms: started,
+            models: models.into_iter().collect(),
+            ..Facts::default()
+        },
+    })
+}
+
+/// Every Pi session under `<session folder>/<folder>/<file>.jsonl` that
+/// holds a conversation or a name.
+pub fn scan_pi(sessions: &Path, cache: &mut Cache) -> Vec<Found> {
+    let mut out = Vec::new();
+    let Ok(folders) = std::fs::read_dir(sessions) else {
+        return out;
+    };
+    for folder in folders.flatten() {
+        if !folder.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let Ok(files) = std::fs::read_dir(folder.path()) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let path = file.path();
+            if path.extension().is_none_or(|e| e != "jsonl") {
+                continue;
+            }
+            if let Some((meta, mtime_ms)) = cache.lookup(&path, parse_pi) {
+                if !meta.is_empty() {
+                    out.push(Found {
+                        meta,
+                        path,
+                        mtime_ms,
+                    });
+                }
+            }
+        }
+    }
+    out
 }

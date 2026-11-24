@@ -65,6 +65,7 @@ When you test by hand, keep your real sessions out of it: run `hc` only against 
 | `src/record.rs` | The record stored as a label on each terminal |
 | `src/history.rs` | The history journal: one private file per session, kept after it ends |
 | `src/transcripts.rs`, `src/resurrect.rs` | `herdr-wake resurrect`: reading Claude Code and Codex transcripts, the list, the checks and the new terminal |
+| `src/facts.rs`, `src/fullread.rs`, `src/opencode_store.rs`, `src/proc.rs`, `src/summary.rs` | `resurrect` details: how a conversation ended (rules per agent), the whole-file read, OpenCode's database through `sqlite3`, running outside programs with a time limit, and summaries |
 | `src/core/` | The herdr-core socket client (`SocketCore`) and a fake for tests (`FakeCore`) |
 | `src/agents/` | One adapter per agent |
 | `src/platform/` | One adapter per OS, plus a fake |

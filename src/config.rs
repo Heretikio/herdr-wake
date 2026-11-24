@@ -26,6 +26,11 @@ pub struct Config {
     /// How many sessions the history journal keeps (`herdr-wake resurrect`
     /// lists them). The oldest are pruned first. 0 keeps no journal.
     pub history_limit: usize,
+    /// Whether `herdr-wake resurrect --summary` and `--prefetch-summaries`
+    /// may make summaries with the local `claude` (which costs a little of
+    /// your Claude usage). False stops that; Claude Code's own recaps and
+    /// summaries made earlier still show.
+    pub summaries: bool,
     /// The program to resume an agent with instead of the one recorded, by
     /// agent name (`claude`, `codex`, `pi`, `opencode`). For agents started
     /// through a wrapper (a script that sets up the environment, then runs
@@ -63,6 +68,7 @@ impl Default for Config {
             first_alone_ms: 8000,
             exclude_dirs: Vec::new(),
             history_limit: 500,
+            summaries: true,
             programs: BTreeMap::new(),
             real_shell: None,
         }

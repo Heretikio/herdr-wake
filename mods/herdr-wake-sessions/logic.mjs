@@ -22,7 +22,10 @@ export function normalizeRow(j) {
     cwd: typeof j.cwd === 'string' ? j.cwd : null,
     exists: j.folder_exists !== false,
     activity: (num(j.last_ms) ?? 0) / 1000,
-    ending: str(j.ending),
+    // How the conversation stood (finished, stopped mid-work) says more than how the journal saw
+    // the agent end (quit, killed), so it wins when herdr-wake read it.
+    ending: str(j.conversation) ?? str(j.ending),
+    closedBy: str(j.ending),
     branch: str(j.branch),
     flags,
     bypass: j.bypass === true,

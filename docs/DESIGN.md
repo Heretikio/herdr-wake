@@ -69,6 +69,7 @@ Measured: recovery starts 0.19 s after core starts and before any client; a sock
 | Log, gate file, last boot summary, backups | `~/.local/state/herdr-wake/` |
 | History journal | `~/.local/state/herdr-wake/history/`: one file per session, kept after it ends, capped by `history_limit`. |
 | Transcript cache | `~/.local/state/herdr-wake/transcripts.json`: what resurrect read from transcripts, by file size and modification time. |
+| Summaries | `~/.local/state/herdr-wake/summaries/<agent>-<id>.json`: one private file per summarized session, valid while the session file's size and time are unchanged. |
 | Resurrect tickets and last listing | `~/.local/state/herdr-wake/resurrect/`: one-use launch tickets and the listing that numbers refer to. |
 | Boot service | macOS: `~/Library/LaunchAgents/dev.heretik.herdr-wake.plist` (default) or a LaunchDaemon with `--before-login`. Linux: `~/.config/systemd/user/herdr-wake.service` plus linger. |
 

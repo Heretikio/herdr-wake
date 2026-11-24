@@ -36,12 +36,13 @@ use serde::{Deserialize, Serialize};
 use crate::agents::{self, Ctx, Plan};
 use crate::config::Config;
 use crate::core::{Core, TerminalId};
+use crate::facts::{self, Extra};
 use crate::history::{self, Ending, Entry};
 use crate::platform::Platform;
 use crate::record::{self, AgentKind, State};
 use crate::transcripts::{self, Cache};
 use crate::wake::{self, Decision};
-use crate::{paths, trust};
+use crate::{opencode_store, paths, trust};
 
 /// Where a row came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -104,6 +105,9 @@ pub struct Row {
     /// When the agent's own session file was last written, in
     /// milliseconds; 0 when there is none to look at.
     pub transcript_mtime_ms: u64,
+    /// What a full read of the session file found (ending, cost, branch,
+    /// models, pull requests, a saved summary) and where the file is.
+    pub extra: Extra,
 }
 
 impl Row {
@@ -340,6 +344,8 @@ pub fn collect(ctx: &mut Ctx, tools: &dyn Tools) -> Collected {
     let mut codex_dirs: BTreeSet<PathBuf> = BTreeSet::new();
     claude_dirs.insert(transcripts::claude_dir(ctx.env, ctx.home));
     codex_dirs.insert(transcripts::codex_dir(ctx.env, ctx.home));
+    let mut pi_dirs: BTreeSet<PathBuf> = BTreeSet::new();
+    pi_dirs.insert(transcripts::pi_dir(ctx.env, ctx.home));
 
     for e in journal {
         seen.insert((e.agent, e.session_id.clone()));
@@ -365,10 +371,21 @@ pub fn collect(ctx: &mut Ctx, tools: &dyn Tools) -> Collected {
             AgentKind::Codex => {
                 codex_dirs.insert(entry_codex_dir(&e, ctx.env, ctx.home));
             }
-            _ => {}
+            AgentKind::Pi => {
+                pi_dirs.extend(agents::pi::session_dirs(&e.to_record(), ctx.env, ctx.home));
+            }
+            AgentKind::OpenCode => {}
         }
         let transcript_mtime_ms = path.as_deref().map_or(0, file_mtime_ms);
+        let extra = Extra {
+            facts: found
+                .as_ref()
+                .map(|f| f.meta.facts.clone())
+                .unwrap_or_default(),
+            path: path.clone(),
+        };
         rows.push(Row {
+            extra,
             transcript_mtime_ms,
             last_ms: e.last_ms().max(found.map_or(0, |f| f.mtime_ms)),
             bypass: has_bypass(e.agent, &e.flags, ctx.cfg),
@@ -419,6 +436,46 @@ pub fn collect(ctx: &mut Ctx, tools: &dyn Tools) -> Collected {
             rows.push(transcript_row(&f, cwd, Vec::new(), env, ctx.cfg));
         }
     }
+    let default_pi = transcripts::pi_dir(ctx.env, ctx.home);
+    for dir in &pi_dirs {
+        for f in transcripts::scan_pi(dir, &mut cache) {
+            let key = (f.meta.agent, f.meta.session_id.clone());
+            let Some(cwd) = f.meta.cwd.clone() else {
+                continue;
+            };
+            if !seen.insert(key) {
+                continue;
+            }
+            let mut env = BTreeMap::new();
+            if *dir != default_pi {
+                env.insert(
+                    "PI_CODING_AGENT_SESSION_DIR".to_string(),
+                    dir.to_string_lossy().into_owned(),
+                );
+            }
+            rows.push(transcript_row(&f, cwd, Vec::new(), env, ctx.cfg));
+        }
+    }
+    // OpenCode keeps its sessions in a database, read through `sqlite3`
+    // when there is one.
+    let db = opencode_store::db_path(ctx.env, ctx.home);
+    let sql = |q: &str| tools.sqlite(&db, q);
+    for f in opencode_store::scan(&db, &sql, &mut cache) {
+        let key = (f.meta.agent, f.meta.session_id.clone());
+        let Some(cwd) = f.meta.cwd.clone() else {
+            continue;
+        };
+        if !seen.insert(key) {
+            continue;
+        }
+        rows.push(transcript_row(
+            &f,
+            cwd,
+            Vec::new(),
+            BTreeMap::new(),
+            ctx.cfg,
+        ));
+    }
     let _ = cache.save(&paths::transcript_cache_file(ctx.env, ctx.home));
 
     let open = open_sessions(ctx, tools, &claude_dirs);
@@ -426,6 +483,7 @@ pub fn collect(ctx: &mut Ctx, tools: &dyn Tools) -> Collected {
     for r in &mut rows {
         r.open = open.contains(r.agent(), r.id()) || is_fresh(now, r.transcript_mtime_ms);
     }
+    crate::summary::attach_cached(&mut rows, ctx.env, ctx.home);
     rows.sort_by(|a, b| {
         b.last_ms
             .cmp(&a.last_ms)
@@ -445,13 +503,19 @@ fn transcript_row(
     cfg: &Config,
 ) -> Row {
     let agent = f.meta.agent;
+    // OpenCode's `path` is its database, not a session file to resume from.
+    let own_file = agent != AgentKind::OpenCode;
     Row {
+        extra: Extra {
+            facts: f.meta.facts.clone(),
+            path: own_file.then(|| f.path.clone()),
+        },
         bypass: has_bypass(agent, &flags, cfg),
         entry: Entry {
             v: history::VERSION,
             agent,
             session_id: f.meta.session_id.clone(),
-            session_file: Some(f.path.clone()),
+            session_file: own_file.then(|| f.path.clone()),
             cwd,
             flags,
             env,
@@ -465,7 +529,11 @@ fn transcript_row(
         last_ms: f.mtime_ms,
         transcript_mtime_ms: f.mtime_ms,
         source: Source::Transcript,
-        transcript: Transcript::Present,
+        transcript: if own_file {
+            Transcript::Present
+        } else {
+            Transcript::Unknown
+        },
         flags_from_transcript: true,
         open: false,
     }
@@ -635,7 +703,7 @@ pub fn render_list(
                         .map_or_else(|| "(no title)".to_string(), one_line),
                     44,
                 ),
-                r.ending().as_str().to_string(),
+                facts::ended_label(r.ending(), r.extra.facts.conversation),
                 if r.bypass { "!" } else { "" }.to_string(),
                 notes(r),
             ]
@@ -709,6 +777,21 @@ pub fn list_json(rows: &[&Row], now_ms: u64) -> serde_json::Value {
                 "transcript": r.transcript.as_str(),
                 "folder_exists": r.entry.cwd.is_dir(),
                 "ended_ms": if r.source == Source::Wake { r.entry.ended_ms } else { None },
+                "conversation": r.extra.facts.conversation.map(facts::Conversation::as_str),
+                "branch": r.extra.facts.branch.as_deref().map(trust::printable),
+                "cost_usd": r.extra.facts.cost_usd,
+                "duration_ms": r.extra.facts.duration_ms,
+                "started_ms": r.extra.facts.started_ms,
+                "lines_added": r.extra.facts.lines_added,
+                "lines_removed": r.extra.facts.lines_removed,
+                "models": r.extra.facts.models.iter().map(|m| trust::printable(m)).collect::<Vec<_>>(),
+                "prs": r.extra.facts.prs.iter().map(|p| serde_json::json!({
+                    "number": p.number,
+                    "url": trust::printable(&p.url),
+                    "repo": p.repo.as_deref().map(trust::printable),
+                })).collect::<Vec<_>>(),
+                "summary": r.extra.facts.summary.as_deref().map(one_line),
+                "summary_source": r.extra.facts.summary_source,
             })
         })
         .collect();
@@ -1394,6 +1477,7 @@ pub fn run_ticket(
         bypass: false,
         open: false,
         transcript_mtime_ms: 0,
+        extra: Extra::default(),
         entry: ticket.entry,
     };
     let launch = {
@@ -1507,6 +1591,12 @@ pub trait Tools {
     /// Runs `herdr-app do <args>` (the desktop app is open). `Err` says why not.
     fn herdr_app_do(&self, _args: &[String]) -> Result<String, String> {
         Err("herdr-app is not available".to_string())
+    }
+    /// Runs a query on OpenCode's database (see `opencode_store`). `Err`
+    /// says why it could not (no `sqlite3`, no database). The default
+    /// reads nothing.
+    fn sqlite(&self, _db: &Path, _query: &str) -> Result<String, String> {
+        Err("OpenCode's database is not read here".to_string())
     }
 }
 
@@ -1639,6 +1729,10 @@ impl Tools for SystemTools {
                 .unwrap_or("");
             Err(format!("hc failed: {}", trust::printable(first)))
         }
+    }
+
+    fn sqlite(&self, db: &Path, query: &str) -> Result<String, String> {
+        opencode_store::run_sqlite3(&self.env, db, query)
     }
 
     fn codex_open_files(&self) -> Vec<PathBuf> {
