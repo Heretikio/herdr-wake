@@ -14,6 +14,7 @@ pub mod platform;
 pub mod private;
 pub mod record;
 pub mod report;
+pub mod resurrect;
 pub mod setup;
 pub mod transcripts;
 pub mod trust;

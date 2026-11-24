@@ -147,6 +147,54 @@ enum Cmd {
         cannot be identified from outside: restart those agents once to record them."
     )]
     Adopt,
+    /// List closed agent sessions and bring one back in a new terminal
+    #[command(
+        long_about = "List closed agent sessions and bring one back in a new terminal.\n\n\
+        With no argument, or a word to search for, it lists the sessions you closed, newest \
+        first, numbered: those herdr-wake recorded (with their exact flags), and, for \
+        Claude Code and Codex, sessions that only left a transcript (flags rebuilt from the \
+        transcript are marked). A session that is running is not listed. The word must \
+        appear in the title, folder, session id or agent name.\n\n\
+        With a number from the last listing, or a session id, it checks the session the way \
+        a wake does (valid id, folder exists and is safe, program is safe, session file \
+        exists) and opens a new herdr-core terminal in the session's folder that resumes \
+        it. The recorded flags are replayed, a permission bypass included, because you \
+        asked; `restore_bypass = false` in config.toml still drops them. \
+        --print prints the command instead (`cd <folder> && <command>`). --fork resumes a \
+        Claude Code session as a copy.\n\n\
+        The terminal belongs to a Herdr space when one can be found; without one it shows \
+        in the phone app and `hc ls` but not in the desktop app.\n\n\
+        Reads herdr-core's socket to leave out running sessions and never starts herdr-core \
+        itself. Run it as your own user, never as root."
+    )]
+    Resurrect {
+        /// A word to search for, a number from the last listing, or a session id
+        target: Option<String>,
+        /// Only sessions in the current folder or inside it
+        #[arg(long, conflicts_with = "folder")]
+        here: bool,
+        /// Only sessions in this folder or inside it
+        #[arg(long, value_name = "DIR")]
+        folder: Option<PathBuf>,
+        /// Only sessions of this agent (claude, codex, pi, opencode)
+        #[arg(long, value_name = "NAME")]
+        agent: Option<String>,
+        /// Most rows to list, 0 for all
+        #[arg(long, value_name = "N", default_value_t = 20)]
+        limit: usize,
+        /// Print the listing as JSON
+        #[arg(long)]
+        json: bool,
+        /// Print the command that brings the session back instead of opening a terminal
+        #[arg(long)]
+        print: bool,
+        /// Resume a Claude Code session as a copy (--fork-session)
+        #[arg(long)]
+        fork: bool,
+        /// Internal: runs in the terminal that was opened
+        #[arg(long, hide = true, value_name = "KEY")]
+        run: Option<String>,
+    },
     /// Internal: called by agent hooks and plugins
     #[command(hide = true)]
     Hook { agent: String, event: String },
@@ -178,6 +226,7 @@ fn writes_as_user(cmd: &Cmd) -> Option<&'static str> {
         Cmd::Forget { .. } => Some("forget"),
         Cmd::Off { .. } => Some("off"),
         Cmd::On { .. } => Some("on"),
+        Cmd::Resurrect { .. } => Some("resurrect"),
         _ => None,
     }
 }
@@ -256,6 +305,27 @@ pub fn main() -> i32 {
         Cmd::On { terminal } => switch(&TerminalId(terminal), false),
         Cmd::Resume { terminal } => resume(&TerminalId(terminal)),
         Cmd::Adopt => adopt(),
+        Cmd::Resurrect { run: Some(key), .. } => resurrect_run(&key),
+        Cmd::Resurrect {
+            target,
+            here,
+            folder,
+            agent,
+            limit,
+            json,
+            print,
+            fork,
+            run: None,
+        } => resurrect(ResurrectArgs {
+            target,
+            here,
+            folder,
+            agent,
+            limit,
+            json,
+            print,
+            fork,
+        }),
     };
     match result {
         Ok(code) => code,
@@ -854,6 +924,145 @@ fn adopt() -> anyhow::Result<i32> {
         println!("no running agents found in herdr-core's terminals");
     } else {
         println!("{recorded} of {seen} running agents newly recorded");
+    }
+    Ok(0)
+}
+
+// -------------------------------------------------------------- resurrect
+
+/// `herdr-wake resurrect --run <key>`: runs in the terminal `hc` opened, and
+/// never returns (the session, then the real shell).
+fn resurrect_run(key: &str) -> anyhow::Result<i32> {
+    std::panic::set_hook(Box::new(|_| {}));
+    let env = hook::process_env();
+    match std::panic::catch_unwind(platform::current) {
+        Ok(p) => crate::resurrect::run_entry(p.as_ref(), env, key),
+        Err(_) => {
+            let shell = env
+                .get("SHELL")
+                .filter(|s| !s.is_empty())
+                .map_or_else(|| "/bin/sh".to_string(), Clone::clone);
+            let err = platform::unix_exec(&[shell], &env, Path::new("/"));
+            Err(anyhow!("cannot start a shell: {err}"))
+        }
+    }
+}
+
+struct ResurrectArgs {
+    target: Option<String>,
+    here: bool,
+    folder: Option<PathBuf>,
+    agent: Option<String>,
+    limit: usize,
+    json: bool,
+    print: bool,
+    fork: bool,
+}
+
+fn resurrect(a: ResurrectArgs) -> anyhow::Result<i32> {
+    use crate::resurrect as rs;
+    let s = Session::new()?;
+    let scope = match (&a.folder, a.here) {
+        (Some(dir), _) => {
+            let cwd = std::env::current_dir().context("finding the current folder")?;
+            Some(cwd.join(dir))
+        }
+        (None, true) => Some(std::env::current_dir().context("finding the current folder")?),
+        (None, false) => None,
+    };
+    let agent = a
+        .agent
+        .as_deref()
+        .map(|n| n.parse::<AgentKind>().map_err(|e| anyhow!("{e}")))
+        .transpose()?;
+    let mut filter = rs::Filter {
+        query: None,
+        scope,
+        agent,
+    };
+    let mut core = s.core();
+    let up = core.hello().is_ok();
+    let rows = rs::collect(&mut s.ctx(&mut core));
+    let now = s.platform.now_ms();
+
+    let open_target = match a.target.as_deref() {
+        Some(t)
+            if a.print
+                || a.fork
+                || t.parse::<usize>().is_ok()
+                || rows.iter().any(|r| r.id() == t) =>
+        {
+            Some(t)
+        }
+        _ => None,
+    };
+    let Some(target) = open_target else {
+        if a.print || a.fork {
+            bail!("--print and --fork need a number from the last listing or a session id");
+        }
+        filter.query = a.target.clone();
+        let (shown, total) = rs::select(&rows, &filter, a.limit);
+        if !up {
+            eprintln!(
+                "note: herdr-core is not running, so sessions open in it are not left out of this list"
+            );
+        }
+        let _ = rs::remember(&s.env, &s.home, &filter, &shown);
+        if a.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&rs::list_json(&shown, now))?
+            );
+        } else {
+            print!(
+                "{}",
+                rs::render_list(&shown, total, now, &s.home, !filter.is_empty())
+            );
+        }
+        return Ok(0);
+    };
+
+    let row = rs::resolve(&rows, target, &filter, &s.env, &s.home).map_err(|e| anyhow!(e))?;
+    let launch = rs::prepare(row, &mut s.ctx(&mut core), a.fork).map_err(|e| anyhow!(e))?;
+    let command = launch.command(&s.env);
+    if a.print {
+        println!("{}", trust::printable(&command));
+        return Ok(0);
+    }
+    if !up {
+        bail!(
+            "herdr-core is not running, so there is no terminal to open (this command did not \
+             start it). Start Herdr or herdr-core, or use --print for the command."
+        );
+    }
+    let key = rs::write_ticket(&s.env, &s.home, now, &launch, a.fork)
+        .context("writing the launch ticket")?;
+    let exe = std::env::current_exe().context("finding this herdr-wake binary")?;
+    let tools = rs::SystemTools { env: s.env.clone() };
+    let opened = rs::open_terminal(&tools, &mut core, &s.env, &s.home, &launch.cwd, &exe, &key)
+        .map_err(|e| anyhow!(e))?;
+    let what = trust::printable(&format!(
+        "{} session {}{}",
+        row.agent(),
+        row.id(),
+        row.title.as_deref().map_or_else(String::new, |t| format!(
+            " ({})",
+            t.split_whitespace().collect::<Vec<_>>().join(" ")
+        ))
+    ));
+    let terminal = if opened.terminal.is_empty() {
+        "a new terminal".to_string()
+    } else {
+        format!("terminal {}", opened.terminal)
+    };
+    println!("Opened {terminal} for the {what}.");
+    println!("It runs: {}", trust::printable(&command));
+    match &opened.space {
+        Some(space) => println!("It is in Herdr space {space}."),
+        None => println!(
+            "No Herdr space was found for it, so it shows in the phone app and `hc ls` but not \
+             in the desktop app."
+        ),
     }
     Ok(0)
 }

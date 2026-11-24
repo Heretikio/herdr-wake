@@ -10,5 +10,6 @@
 mod harness;
 
 mod resume;
+mod resurrect;
 mod setup;
 mod tools;

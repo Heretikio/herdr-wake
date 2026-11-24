@@ -84,6 +84,26 @@ pub fn decide(rec: Option<&Record>, agent: Option<&dyn Agent>, ctx: &mut Ctx) ->
     {
         return Decision::Shell;
     }
+    launch_decision(rec, agent, ctx, true)
+}
+
+/// Whether `rec` may be launched, and how: the checks every launch of a
+/// recorded session passes, after `decide` has settled that a launch is
+/// wanted. `herdr-wake resurrect` makes the same checks for a session a
+/// person asks for (with `check_attempts` off, as attempts count resumes
+/// after a reboot).
+///
+/// `GiveUp` when the adapter is missing, the session id is not valid, the
+/// folder fails `trust::folder_is_safe`, the plan is `Permanent`, the
+/// attempts are used up (only when `check_attempts`), or the program is not
+/// safe to run. Otherwise `Resume` with the agent's plan, its flags filtered
+/// again by `restore_bypass` and its program replaced by `programs`.
+pub fn launch_decision(
+    rec: &Record,
+    agent: Option<&dyn Agent>,
+    ctx: &mut Ctx,
+    check_attempts: bool,
+) -> Decision {
     let Some(agent) = agent else {
         return Decision::GiveUp {
             reason: format!("no adapter for {}", rec.agent),
@@ -121,7 +141,7 @@ pub fn decide(rec: Option<&Record>, agent: Option<&dyn Agent>, ctx: &mut Ctx) ->
     // Attempts count per boot: a record that ran out on an earlier boot
     // starts again at 0.
     let used = rec.attempts_on(&ctx.platform.boot_id());
-    if used >= ctx.cfg.attempts {
+    if check_attempts && used >= ctx.cfg.attempts {
         let manual = match &plan {
             Plan::Run { argv, cwd, .. } => manual_command(cwd, argv),
             Plan::Permanent(_) => manual_hint(rec, agent, ctx.cfg, program.as_deref()),
@@ -247,7 +267,7 @@ pub fn shell_quote(s: &str) -> String {
 }
 
 /// `cd <cwd> && <argv...>`, every word quoted.
-fn manual_command(cwd: &Path, argv: &[String]) -> String {
+pub(crate) fn manual_command(cwd: &Path, argv: &[String]) -> String {
     let words: Vec<String> = argv.iter().map(|a| shell_quote(a)).collect();
     format!(
         "cd {} && {}",
@@ -585,9 +605,6 @@ fn wake_body(
     };
     wait_at_gate(platform, env, home, cfg, &key, rec.agent, seams);
 
-    let shell_program = shell_argvs(platform, env, cfg)
-        .first()
-        .and_then(|a| a.first().cloned());
     let mut rec = rec;
     let mut tries: u8 = 0;
     loop {
@@ -607,13 +624,7 @@ fn wake_body(
         tries = tries.saturating_add(1);
         drop(core);
 
-        let mut child_env = env.clone();
-        if let Some(sh) = &shell_program {
-            child_env
-                .entry("SHELL".to_string())
-                .or_insert_with(|| sh.clone());
-        }
-        child_env.extend(plan_env);
+        let mut child_env = launch_env(platform, env, cfg, plan_env);
         child_env.insert(SUPERVISED_ENV.to_string(), "1".to_string());
         for cmd in &before {
             run_before(cmd, &child_env, &cwd);
@@ -733,6 +744,25 @@ fn journal_end(
     });
 }
 
+/// The environment an agent is started with: the caller's own, `SHELL` set
+/// to the real shell when it has none, and the plan's variables over it.
+pub(crate) fn launch_env(
+    platform: &dyn Platform,
+    env: &BTreeMap<String, String>,
+    cfg: &Config,
+    plan_env: BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let shell_program = shell_argvs(platform, env, cfg)
+        .first()
+        .and_then(|a| a.first().cloned());
+    let mut child_env = env.clone();
+    if let Some(sh) = shell_program {
+        child_env.entry("SHELL".to_string()).or_insert(sh);
+    }
+    child_env.extend(plan_env);
+    child_env
+}
+
 /// True when the label's record is the one herdr-wake itself stored for
 /// this terminal (see `record::copy_matches`).
 fn trusted(
@@ -835,7 +865,7 @@ fn describe(x: &ExitInfo) -> String {
 /// Runs one `before` command to completion, killing it after
 /// `BEFORE_TIMEOUT`. Its output is discarded and failures are ignored: the
 /// agent's own start decides whether the resume worked.
-fn run_before(argv: &[String], env: &BTreeMap<String, String>, cwd: &Path) {
+pub(crate) fn run_before(argv: &[String], env: &BTreeMap<String, String>, cwd: &Path) {
     let Some((prog, args)) = argv.split_first() else {
         return;
     };
@@ -919,7 +949,7 @@ fn shell_argvs(
 /// Execs the real shell, falling back down `shell_argvs`, in `folder` when
 /// it exists, else the terminal's own folder; last of all `/bin/sh` in `/`.
 /// Returns the last exec error.
-fn exec_shell(
+pub(crate) fn exec_shell(
     platform: &dyn Platform,
     env: &BTreeMap<String, String>,
     home: &Path,

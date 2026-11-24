@@ -29,6 +29,7 @@ fn help_exits_zero_and_lists_the_user_commands_only() {
         "on",
         "resume",
         "adopt",
+        "resurrect",
     ] {
         assert!(
             text.contains(&format!("\n  {cmd} ")),
@@ -150,6 +151,7 @@ fn commands_that_write_refuse_to_run_as_root() {
         "forget",
         "on",
         "off",
+        "resurrect",
     ] {
         let err = refuse_root(cmd, 0).unwrap_err();
         assert!(err.contains(cmd), "{err}");
@@ -183,4 +185,163 @@ fn doctor_reports_a_broken_config_as_a_failed_check() {
         stdout.contains("core shell"),
         "the other checks still run: {stdout}"
     );
+}
+
+// ---- resurrect ----
+
+/// `herdr-wake resurrect` in a clean home with no herdr-core.
+fn resurrect(home: &std::path::Path, args: &[&str]) -> std::process::Output {
+    bin()
+        .arg("resurrect")
+        .args(args)
+        .env("HOME", home)
+        .env("PATH", "/usr/bin:/bin")
+        .current_dir(home)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn resurrect_help_lists_its_options_and_hides_the_internal_one() {
+    let out = bin().args(["resurrect", "--help"]).output().unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    for word in [
+        "--here", "--folder", "--agent", "--limit", "--json", "--print", "--fork",
+    ] {
+        assert!(text.contains(word), "{word} missing:\n{text}");
+    }
+    assert!(!text.contains("--run"), "{text}");
+    assert!(!text.contains('\u{2014}'));
+}
+
+#[test]
+fn resurrect_with_nothing_recorded_says_so_and_does_not_need_core() {
+    let home = tempfile::tempdir().unwrap();
+    let out = resurrect(home.path(), &[]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "No closed sessions found.\n"
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("herdr-core is not running"));
+
+    let out = resurrect(home.path(), &["--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["sessions"], serde_json::json!([]));
+
+    let out = resurrect(home.path(), &["two", "words"]);
+    assert_eq!(out.status.code(), Some(2), "one search argument only");
+}
+
+#[test]
+fn resurrect_refuses_what_makes_no_sense() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let err = |args: &[&str]| {
+        let out = resurrect(h, args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    assert!(err(&["3"]).contains("no earlier listing"));
+    assert!(err(&["--print"]).contains("need a number"));
+    assert!(err(&["--fork"]).contains("need a number"));
+    assert!(err(&["--agent", "emacs"]).contains("unknown agent"));
+    assert!(err(&["no-such-session-id", "--print"]).contains("no session with the id"));
+    let out = resurrect(h, &["--here", "--folder", "/x"]);
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn resurrect_print_gives_the_command_for_a_journaled_session() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    // A program named claude that the safety check accepts.
+    let bindir = home.path().join("bin");
+    std::fs::create_dir_all(&bindir).unwrap();
+    let claude = bindir.join("claude");
+    std::fs::write(&claude, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let id = "0b5a2c1e-1111-4222-8333-444455556666";
+    // Its transcript and its journal entry.
+    let projects = home
+        .path()
+        .join(".claude/projects")
+        .join(herdr_wake::agents::claude::project_dir_name(work.path()));
+    std::fs::create_dir_all(&projects).unwrap();
+    std::fs::write(
+        projects.join(format!("{id}.jsonl")),
+        serde_json::json!({"type":"user","cwd":work.path(),"message":{"role":"user","content":"hi"}})
+            .to_string()
+            + "\n",
+    )
+    .unwrap();
+    let mut rec = herdr_wake::record::Record::new(
+        herdr_wake::record::AgentKind::Claude,
+        id,
+        work.path().to_path_buf(),
+        claude.clone(),
+        "b",
+    );
+    rec.flags = vec!["--model".into(), "opus".into()];
+    let dir = home.path().join(".local/state/herdr-wake/history");
+    herdr_wake::history::started(&dir, 500, &"t1".into(), &rec, 1000).unwrap();
+    herdr_wake::history::ended(
+        &dir,
+        500,
+        rec.agent,
+        id,
+        None,
+        herdr_wake::history::Ending::Quit,
+        2000,
+    )
+    .unwrap();
+
+    let out = bin()
+        .args(["resurrect", "--print", id])
+        .env("HOME", home.path())
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let printed = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(
+        printed.trim_end(),
+        format!(
+            "cd {} && {} --model opus --resume {id}",
+            work.path().display(),
+            claude.display()
+        )
+    );
+
+    // Opening a terminal needs a running core, and says so.
+    let out = bin()
+        .args(["resurrect", id])
+        .env("HOME", home.path())
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("herdr-core is not running"));
+}
+
+#[test]
+fn resurrect_run_with_no_ticket_says_why_and_ends_in_a_shell() {
+    let home = tempfile::tempdir().unwrap();
+    let out = bin()
+        .args(["resurrect", "--run", "nope"])
+        .env("HOME", home.path())
+        .env("SHELL", "/bin/sh")
+        .current_dir(home.path())
+        .output()
+        .unwrap();
+    // stdin is closed, so the shell exits at once.
+    assert_eq!(out.status.code(), Some(0));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("cannot bring the session back"), "{err}");
 }
