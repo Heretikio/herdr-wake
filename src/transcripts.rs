@@ -254,15 +254,21 @@ fn read_lines(path: &Path, size: u64) -> std::io::Result<(Lines, Lines)> {
     }
     let mut tail = Vec::new();
     if !whole {
+        // One byte before the piece says whether it starts on a line.
         let start = size.saturating_sub(CHUNK).max(CHUNK);
-        f.seek(SeekFrom::Start(start))?;
-        f.take(CHUNK).read_to_end(&mut tail)?;
-        // The first line is cut (or continues the one dropped above).
-        match tail.iter().position(|&b| b == b'\n') {
-            Some(i) => {
-                tail.drain(..=i);
+        f.seek(SeekFrom::Start(start - 1))?;
+        let mut piece = Vec::new();
+        f.take(CHUNK + 1).read_to_end(&mut piece)?;
+        let starts_a_line = piece.first() == Some(&b'\n');
+        tail = piece.split_off(1.min(piece.len()));
+        if !starts_a_line {
+            // The first line is cut (or continues the one dropped above).
+            match tail.iter().position(|&b| b == b'\n') {
+                Some(i) => {
+                    tail.drain(..=i);
+                }
+                None => tail.clear(),
             }
-            None => tail.clear(),
         }
     }
     let lines = |b: &[u8]| -> Vec<Vec<u8>> {
@@ -474,13 +480,42 @@ pub fn claude_transcript(config: &Path, cwd: &Path, id: &str) -> Option<PathBuf>
 
 /// Thread names from `<codex home>/session_index.jsonl`, by thread id; the
 /// last line for an id wins.
+///
+/// At most the last 8 MB of the file are read, and each line is decoded
+/// on its own (invalid UTF-8 costs that line only).
 pub fn codex_names(codex_home: &Path) -> BTreeMap<String, String> {
+    const MAX: u64 = 8 * 1024 * 1024;
     let mut names = BTreeMap::new();
-    let Ok(text) = std::fs::read_to_string(codex_home.join("session_index.jsonl")) else {
+    let Ok(mut f) = std::fs::File::open(codex_home.join("session_index.jsonl")) else {
         return names;
     };
-    for line in text.lines() {
-        let Ok(v) = serde_json::from_str::<Value>(line) else {
+    let Ok(md) = f.metadata() else {
+        return names;
+    };
+    let mut bytes = Vec::new();
+    let cut = md.len() > MAX;
+    if cut && f.seek(SeekFrom::Start(md.len() - MAX - 1)).is_err() {
+        return names;
+    }
+    if f.take(MAX + 1).read_to_end(&mut bytes).is_err() {
+        return names;
+    }
+    if cut {
+        // Drop the line the cut lands in.
+        let first_is_line_end = bytes.first() == Some(&b'\n');
+        bytes.remove(0);
+        if !first_is_line_end {
+            match bytes.iter().position(|&b| b == b'\n') {
+                Some(i) => {
+                    bytes.drain(..=i);
+                }
+                None => bytes.clear(),
+            }
+        }
+    }
+    for raw in bytes.split(|&b| b == b'\n') {
+        let line = String::from_utf8_lossy(raw);
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
         if let (Some(id), Some(name)) = (str_of(&v, "id"), str_of(&v, "thread_name")) {

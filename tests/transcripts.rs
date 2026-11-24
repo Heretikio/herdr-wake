@@ -192,6 +192,65 @@ fn reads_are_bounded_to_the_first_and_last_128_kb() {
 }
 
 #[test]
+fn a_tail_piece_that_starts_on_a_line_keeps_its_first_line() {
+    const CHUNK: usize = 128 * 1024;
+    let c = tempfile::tempdir().unwrap();
+    let f = claude_file(c.path(), "p", ID);
+    std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+    // A row of exactly `len` bytes, newline included.
+    let row = |ty: &str, extra: &str, len: usize| {
+        let bare = format!(r#"{{"type":"{ty}",{extra}"pad":""}}"#).len() + 1;
+        format!(
+            "{{\"type\":\"{ty}\",{extra}\"pad\":\"{}\"}}\n",
+            "x".repeat(len - bare)
+        )
+    };
+    let filler = row("attachment", "", 100);
+    // The title row is the first line of the last 128 KB: what follows it
+    // (itself included) is exactly one piece long.
+    let title_len = 172;
+    assert_eq!((CHUNK - title_len) % 100, 0);
+    let mut text = format!("{}\n", user("first prompt"));
+    text.push_str(&filler.repeat(3000));
+    text.push_str(&row("ai-title", "\"aiTitle\":\"Edge title\",", title_len));
+    text.push_str(&filler.repeat((CHUNK - title_len) / 100));
+    std::fs::write(&f, text).unwrap();
+
+    assert_eq!(
+        scan(c.path())[0].meta.ai_title.as_deref(),
+        Some("Edge title")
+    );
+}
+
+#[test]
+fn codex_names_survive_a_bad_byte_and_a_huge_file() {
+    let h = tempfile::tempdir().unwrap();
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(
+        format!("{}\n", json!({"id": ID, "thread_name": "Good name"})).as_bytes(),
+    );
+    bytes.extend_from_slice(b"{\"id\":\"x\",\"thread_name\":\"bad \xff byte\"}\n");
+    bytes
+        .extend_from_slice(format!("{}\n", json!({"id": ID2, "thread_name": "Second"})).as_bytes());
+    std::fs::write(h.path().join("session_index.jsonl"), &bytes).unwrap();
+    let names = transcripts::codex_names(h.path());
+    assert_eq!(names.get(ID).map(String::as_str), Some("Good name"));
+    assert_eq!(names.get(ID2).map(String::as_str), Some("Second"));
+
+    // Over the 8 MB cap: the first lines are not read, the last ones are.
+    let mut big = format!("{}\n", json!({"id": ID, "thread_name": "Too early"})).into_bytes();
+    let pad = format!("{}\n", json!({"id": "pad", "thread_name": "p".repeat(900)}));
+    for _ in 0..(9 * 1024 * 1024 / pad.len()) {
+        big.extend_from_slice(pad.as_bytes());
+    }
+    big.extend_from_slice(format!("{}\n", json!({"id": ID2, "thread_name": "Late"})).as_bytes());
+    std::fs::write(h.path().join("session_index.jsonl"), &big).unwrap();
+    let names = transcripts::codex_names(h.path());
+    assert_eq!(names.get(ID), None);
+    assert_eq!(names.get(ID2).map(String::as_str), Some("Late"));
+}
+
+#[test]
 fn a_title_is_one_short_line() {
     let c = tempfile::tempdir().unwrap();
     write_lines(

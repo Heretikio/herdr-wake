@@ -194,13 +194,23 @@ pub fn valid_session_id(id: &str) -> bool {
 }
 
 /// `text` without control characters: everything below 0x20 except tab,
-/// 0x7f, and the C1 range 0x80 to 0x9f. Applied to whatever comes from a
+/// 0x7f, the C1 range 0x80 to 0x9f, the bidirectional controls (U+202A to
+/// U+202E and U+2066 to U+2069, which can make text read in another order
+/// than it is stored) and the line and paragraph separators U+2028 and
+/// U+2029. Applied to whatever comes from a
 /// record or a hook payload before it is printed to a terminal or written
 /// to the log, so a label cannot send escape sequences to the terminal or
 /// start a forged line in the log.
 pub fn printable(text: &str) -> String {
     text.chars()
-        .filter(|&c| c == '\t' || !(c.is_control() || ('\u{80}'..='\u{9f}').contains(&c)))
+        .filter(|&c| {
+            c == '\t'
+                || !(c.is_control()
+                    || ('\u{80}'..='\u{9f}').contains(&c)
+                    || ('\u{202a}'..='\u{202e}').contains(&c)
+                    || ('\u{2066}'..='\u{2069}').contains(&c)
+                    || matches!(c, '\u{2028}' | '\u{2029}'))
+        })
         .collect()
 }
 

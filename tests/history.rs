@@ -185,6 +185,57 @@ fn the_cap_removes_the_oldest_entries_and_never_the_new_one() {
 }
 
 #[test]
+fn files_that_are_not_entries_are_neither_counted_nor_pruned() {
+    let (_t, d) = dir();
+    for (i, id) in ["a1", "a2"].iter().enumerate() {
+        history::started(&d, 2, &tid(), &rec(id), 100 + i as u64).unwrap();
+    }
+    // Things a newer build, or something else, may have put there.
+    std::fs::write(d.join("claude-bad.json"), "{not json").unwrap();
+    std::fs::write(d.join("claude-big.json"), vec![b' '; 300 * 1024]).unwrap();
+    let newer = std::fs::read_to_string(history::file(&d, AgentKind::Claude, "a1"))
+        .unwrap()
+        .replace("\"v\":1", "\"v\":2")
+        .replace("a1", "zz");
+    std::fs::write(d.join("claude-zz.json"), newer).unwrap();
+
+    history::started(&d, 2, &tid(), &rec("a3"), 300).unwrap();
+
+    let mut ids: Vec<String> = history::read_all(&d)
+        .into_iter()
+        .map(|e| e.session_id)
+        .collect();
+    ids.sort();
+    assert_eq!(ids, ["a2", "a3"], "only the oldest readable entry went");
+    for f in ["claude-bad.json", "claude-big.json", "claude-zz.json"] {
+        assert!(d.join(f).exists(), "{f} was removed");
+    }
+}
+
+#[test]
+fn stale_temporary_files_are_removed_after_an_hour() {
+    let (_t, d) = dir();
+    history::started(&d, 500, &tid(), &rec("a1"), 1).unwrap();
+    let old = d.join(".claude-a1.json.tmp-123-0");
+    let fresh = d.join(".claude-a1.json.tmp-124-0");
+    for f in [&old, &fresh] {
+        std::fs::write(f, "partial").unwrap();
+    }
+    let two_hours_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+    std::fs::File::options()
+        .write(true)
+        .open(&old)
+        .unwrap()
+        .set_modified(two_hours_ago)
+        .unwrap();
+
+    history::started(&d, 500, &tid(), &rec("a2"), 2).unwrap();
+
+    assert!(!old.exists(), "a stale temporary file stays");
+    assert!(fresh.exists(), "a fresh one may be a write in progress");
+}
+
+#[test]
 fn a_limit_of_zero_writes_no_journal() {
     let (_t, d) = dir();
     history::started(&d, 0, &tid(), &rec(SID), 1).unwrap();

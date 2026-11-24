@@ -32,6 +32,25 @@ fn printable_strips_control_characters_and_keeps_the_rest() {
     assert_eq!(printable(""), "");
 }
 
+#[test]
+fn printable_drops_bidirectional_controls_and_line_separators() {
+    // The embedding, override and isolate controls.
+    let bidi = "\u{202a}\u{202b}\u{202c}\u{202d}\u{202e}\u{2066}\u{2067}\u{2068}\u{2069}";
+    assert_eq!(printable(&format!("a{bidi}b")), "ab");
+    assert_eq!(printable("a\u{2028}b\u{2029}c"), "abc");
+    // A filename dressed up to read backwards.
+    assert_eq!(printable("txt.\u{202e}gpj.exe"), "txt.gpj.exe");
+    // Neighbouring characters stay: right-to-left text itself is fine.
+    assert_eq!(
+        printable("\u{5e9}\u{5dc}\u{5d5}\u{5dd} \u{2029}"),
+        "\u{5e9}\u{5dc}\u{5d5}\u{5dd} "
+    );
+    assert_eq!(
+        printable("\u{2065}\u{202f}\u{206a}"),
+        "\u{2065}\u{202f}\u{206a}"
+    );
+}
+
 fn hostile() -> String {
     format!("/tmp/x{ESC}]0;owned\u{7}\n1700000000000 pid=1 hook claude start: recorded")
 }

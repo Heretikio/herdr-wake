@@ -193,31 +193,51 @@ fn store(dir: &Path, limit: usize, entry: &Entry) -> io::Result<()> {
     Ok(())
 }
 
+/// How old a temporary file left by an interrupted write must be before
+/// `prune` removes it.
+const STALE_TMP: std::time::Duration = std::time::Duration::from_secs(3600);
+
 /// Removes the entries with the oldest last activity until `limit` are left.
-/// `keep` is never removed. Files that cannot be read count as oldest.
+/// `keep` is never removed. A file that cannot be read as an entry (too big,
+/// malformed, another schema version, a symlink) is neither counted nor
+/// removed: it may be a newer build's. Temporary files left by an
+/// interrupted write are removed once they are an hour old.
 fn prune(dir: &Path, limit: usize, keep: &Path) {
     let Ok(listing) = std::fs::read_dir(dir) else {
         return;
     };
-    let files: Vec<PathBuf> = listing
-        .flatten()
-        .filter(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            name.ends_with(".json") && !name.starts_with('.')
-        })
-        .map(|e| e.path())
-        .collect();
+    let mut files: Vec<PathBuf> = Vec::new();
+    for e in listing.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.contains(".tmp-") {
+            let stale = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > STALE_TMP);
+            if stale && e.file_type().is_ok_and(|t| t.is_file()) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        } else if name.ends_with(".json") && !name.starts_with('.') {
+            files.push(e.path());
+        }
+    }
     if files.len() <= limit {
         return;
     }
     let mut aged: Vec<(u64, PathBuf)> = files
         .into_iter()
         .filter(|p| p != keep)
-        .map(|p| (read_file(&p).map_or(0, |e| e.last_ms()), p))
+        .filter_map(|p| Some((read_file(&p)?.last_ms(), p)))
         .collect();
+    // The entry just written counts too.
+    let total = aged.len() + 1;
+    if total <= limit {
+        return;
+    }
     aged.sort();
-    let excess = aged.len() + 1 - limit.max(1);
-    for (_, p) in aged.into_iter().take(excess) {
+    for (_, p) in aged.into_iter().take(total - limit.max(1)) {
         let _ = std::fs::remove_file(p);
     }
 }
