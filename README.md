@@ -155,10 +155,10 @@ The full design, including what the prototype changed, is in [docs/DESIGN.md](do
 
 ```
 $ herdr-wake resurrect
-#  AGE  AGENT   PLACE            TITLE                      ENDED   !  SOURCE
-1  3h   claude  ~/git/webshop    Add iDEAL to the checkout  quit    !  wake
-2  1d   codex   ~/git/api        fix the login bug          unknown    transcript
-3  2d   claude  ~/git/webshop    Release notes for 1.4      killed     wake, transcript gone
+#  AGE  AGENT   PLACE            TITLE                      ENDED             !  SOURCE
+1  3h   claude  ~/git/webshop    Add iDEAL to the checkout  quit, finished    !  wake
+2  1d   codex   ~/git/api        fix the login bug          stopped mid-work     transcript
+3  2d   claude  ~/git/webshop    Release notes for 1.4      killed, finished     wake, transcript gone
 ! restores a permission bypass
 
 $ herdr-wake resurrect checkout --here     # search words, only this folder and below
@@ -166,9 +166,14 @@ $ herdr-wake resurrect 1                   # open row 1 in a new terminal
 $ herdr-wake resurrect 1 --print           # print `cd <folder> && <command>` instead
 $ herdr-wake resurrect 1 --fork            # Claude Code: resume as a copy
 $ herdr-wake resurrect --json              # the same list for scripts
+$ herdr-wake resurrect --summary <ID>      # a short summary of one session, as JSON
+$ herdr-wake resurrect --prefetch-summaries 20   # make the missing ones for the top 20
 ```
 
-- **Where the list comes from.** herdr-wake keeps a small private file per recorded session in `~/.local/state/herdr-wake/history/` (agent, session id, folder, the exact flags, program, the environment allowlist, when it started and how it ended: quit, killed, replaced by a new session in the same terminal, forgotten, or unknown). Sessions from before you installed, or run outside Herdr, are read from Claude Code's and Codex's own transcripts (`~/.claude/projects`, `~/.codex/sessions`; only the first and last 128 KB of each file). For those, flags are rebuilt from the transcript and the row says `transcript`: Claude's first recorded permission mode becomes `--dangerously-skip-permissions` or `--permission-mode <mode>`, Codex gets no flags. Pi and OpenCode are listed only from the journal. `history_limit` in `config.toml` caps the journal (default 500).
+- **Where the list comes from.** herdr-wake keeps a small private file per recorded session in `~/.local/state/herdr-wake/history/` (agent, session id, folder, the exact flags, program, the environment allowlist, when it started and how it ended: quit, killed, replaced by a new session in the same terminal, forgotten, or unknown). Sessions from before you installed, or run outside Herdr, are read from the agents' own files: Claude Code's and Codex's transcripts (`~/.claude/projects`, `~/.codex/sessions`), Pi's session files (`~/.pi/agent/sessions`) and OpenCode's database (`~/.local/share/opencode/opencode.db`, read with the `sqlite3` program in read-only mode; without `sqlite3`, OpenCode rows that left nothing else are not listed). Titles come from the first and last 128 KB of a file; the details below need the whole file, which is read once and cached by size and modification time. For those rows, flags are rebuilt from the transcript and the row says `transcript`: Claude's first recorded permission mode becomes `--dangerously-skip-permissions` or `--permission-mode <mode>`, Codex, Pi and OpenCode get no flags beyond what their resume adds. Sub-agent sessions are left out. `history_limit` in `config.toml` caps the journal (default 500).
+- **How the conversation ended.** For Claude Code, Codex, Pi and OpenCode (journal rows with a session file too) the ENDED column adds how the conversation stood, from the session file: `finished` (the agent's last answer was complete), `unanswered` (your last message got no answer), `interrupted`, or `mid-work` (it stopped in a tool call). A row the journal knows shows both (`quit, finished`, `killed, mid-work`); a transcript-only row shows the conversation alone (`stopped mid-work`). Only your words and the agent's count: reminders, slash commands, hook output, sub-agent rows and compaction summaries do not. `--json` has the journal's ending as `ending` and the conversation as `conversation` (`finished`, `unanswered`, `interrupted`, `mid-action`, or null).
+- **Details in `--json`.** `branch`, `cost_usd` (Claude: its last cost record; OpenCode: its session cost; Pi: the sum of the answers' costs; not for Codex), `duration_ms`, `started_ms`, `lines_added`, `lines_removed`, `models`, `prs` (`number`, `url`, `repo`; Claude's pull-request records, `https` addresses only), `summary` and `summary_source`. A value the file does not hold is `null` (an empty list for `models` and `prs`).
+- **Summaries.** `herdr-wake resurrect --summary <ID>` prints `{"summary": ..., "summary_source": ...}`. A Claude Code recap (the one it writes when you step away) with no message of yours after it is used as it is (`recap`). Otherwise your messages and the agent's answers (no tool output, no reminders) go to the local `claude` on `PATH`, which is run as `claude -p` with no settings, MCP servers, slash commands, tools or session file, in `dontAsk` mode, on `claude-haiku-5-5` at low effort, and the answer (one paragraph, at most 60 words) is saved in `~/.local/state/herdr-wake/summaries/` until the session file changes (`claude`). That costs a little of your Claude usage, also for Codex, Pi and OpenCode sessions; a conversation over a million characters is never sent. `--prefetch-summaries N` does the same one by one for the first N sessions of the listing and stops at the first failure of `claude` itself (not found, not logged in). A plain listing never makes a summary; it shows the ones saved. `summaries = false` in `config.toml` stops making them (recaps and saved ones still show). A summary that seems to hold a secret is saved and shown as `(summary hidden: looks like a credential)`.
 - **A session that is running is not listed**: a live record on a Herdr terminal (when core is running; `resurrect` never starts it), a Claude session file whose process is alive, a Codex rollout that a running Codex holds open (`lsof` on macOS, `/proc` on Linux), an agent whose command line names the session, or a session file written in the last two minutes. It does not guess from the folder. `--fork` still works on a running Claude session (a fork is safe); a plain resume of one is refused.
 - **A number is a row of the last table you listed in this terminal**, for one hour (a word made only of digits is read as a number; `--id <SESSION-ID>` names an id that looks like one). `--json` does not set the numbers. If you give filters with the number they must be the ones that listing used. Each Herdr terminal (and each tty) has its own listing.
 - **What is shown.** The table, `--json` and the line printed after opening show flag names only (plus the values of `--permission-mode`, `--model`, `-s/--sandbox` and `-a/--ask-for-approval`); `--print` and the "To retry" line carry the exact command, because they have to run. A title that seems to hold a secret value (a word shaped like an API key or token, such as `sk-...` or `ghp_...`, an assignment such as `password=...`, or a long random-looking string) is replaced by `(title hidden: looks like a credential)`, also in the transcript cache. Titles that only mention keys or auth stay visible. A folder or flag with control or direction-changing characters is refused, not printed.
@@ -214,7 +219,7 @@ Terminals are named the way herdr-core names them, for example `t3`.
 - `herdr-wake resume t3` re-arms a session that failed, so it resumes at the next recovery, and prints the command to run it now. It does not start the agent itself. It also accepts a record shown as `untrusted`: read the command it prints before you rely on it.
 - `herdr-wake adopt` records agents that were already running before you installed. It can do this for Claude Code only; restart Codex, Pi and OpenCode sessions once to record them.
 
-- `herdr-wake resurrect [WORD] [--here | --folder DIR] [--agent NAME] [--limit N] [--json]` lists closed sessions, newest first, and `herdr-wake resurrect <number or session id> [--print] [--fork]` brings one back (see [Bring back a closed session](#bring-back-a-closed-session)). It refuses to run as root.
+- `herdr-wake resurrect [WORD] [--here | --folder DIR] [--agent NAME] [--limit N] [--json]` lists closed sessions, newest first, `herdr-wake resurrect <number or session id> [--print] [--fork]` brings one back, and `herdr-wake resurrect --summary <session id>` and `--prefetch-summaries <N>` print and make summaries (see [Bring back a closed session](#bring-back-a-closed-session)). It refuses to run as root.
 
 `hook`, `watch`, `shell` and `boot` are internal: agents, herdr-core and the boot service call them.
 
@@ -376,7 +381,7 @@ Options:
 $ herdr-wake resurrect --help
 List closed agent sessions and bring one back in a new terminal.
 
-With no argument, or a word to search for, it lists the sessions you closed, newest first, numbered: those herdr-wake recorded (with their exact flags), and, for Claude Code and Codex, sessions that only left a transcript (flags rebuilt from the transcript are marked). A session that is running is not listed. Every word must appear in the title, folder, session id or agent name. A word made only of digits is read as a number; --id names a session by an id that looks like one.
+With no argument, or a word to search for, it lists the sessions you closed, newest first, numbered: those herdr-wake recorded (with their exact flags), and sessions that only left their own files (Claude Code and Codex transcripts, Pi session files, OpenCode's database; flags rebuilt from the transcript are marked). The ENDED column says how it ended and how the conversation stood (finished, unanswered, interrupted, stopped mid-work). A session that is running is not listed. Every word must appear in the title, folder, session id or agent name. A word made only of digits is read as a number; --id names a session by an id that looks like one.
 
 A number is a row of the last table listed in this terminal, good for an hour (--json does not set it).
 
@@ -419,6 +424,12 @@ Options:
       --fork
           Resume a Claude Code session as a copy (--fork-session)
 
+      --summary <SESSION-ID>
+          Print a summary of this session as JSON (Claude Code's own recap, a saved summary, or one made now with the local claude, which uses a little of your Claude usage)
+
+      --prefetch-summaries <N>
+          Make the missing summaries of the first N sessions of the listing, one by one
+
   -h, --help
           Print help (see a summary with '-h')
 ```
@@ -444,6 +455,7 @@ Settings live in `~/.config/herdr-wake/config.toml` (or under `$XDG_CONFIG_HOME`
 | `first_alone_ms` | `8000` | How long the first agent of each kind starts alone, in milliseconds. The wait ends early once that agent reports in. |
 | `exclude_dirs` | `[]` | Folders (and everything under them) whose sessions are never recorded and never resumed. Absolute paths, or paths starting with `~/`. Whole folder names are compared: `~/private` does not cover `~/private-notes`. |
 | `history_limit` | `500` | How many closed sessions the history journal keeps for `herdr-wake resurrect`. The ones with the oldest activity are removed first. `0` keeps no journal. |
+| `summaries` | `true` | Whether `herdr-wake resurrect --summary` and `--prefetch-summaries` may make summaries with the local `claude` (a little of your Claude usage). `false` stops that; Claude Code's own recaps and summaries made earlier still show. |
 | `programs` | none | A table, by agent name (`claude`, `codex`, `pi`, `opencode`): the program to resume that agent with instead of the one recorded. For agents you start through a wrapper script: the resume goes through it again. An absolute path or one starting with `~/`; owned by you or root, executable, not writable by group or others. The resume command keeps the agent's flags and session, only the program changes. Used only while `config.toml` and its folder are yours alone (not group- or other-writable, not symlinks); `doctor` shows each entry and warns about a name that is not an agent. See [docs/LIMITS.md](docs/LIMITS.md#records). |
 | `real_shell` | written by install | herdr-core's `shell` setting as it was before install, as a list, for example `["/bin/zsh", "-l"]`. herdr-wake hands over to it. When absent, it uses `$SHELL` as a login shell, then `/bin/sh`. Uninstall puts it back. |
 
@@ -536,7 +548,7 @@ Every known limit and untested area is in [docs/LIMITS.md](docs/LIMITS.md). The 
 - Codex: approve the hook once in `/hooks`; two Codex sessions started in the same folder at the same time cannot be told apart, and neither is recorded.
 - OpenCode v2: if the session no longer exists, OpenCode opens a new chat; herdr-wake reports that as "unconfirmed" but cannot prevent it.
 - `adopt` handles Claude Code only.
-- `resurrect`: Pi and OpenCode sessions are listed only from herdr-wake's own journal; Claude deletes old transcripts and cannot resume them (shown as `transcript gone`); a terminal opened without a Herdr space shows in the phone app and `hc ls` but not in the desktop app. See [docs/LIMITS.md](docs/LIMITS.md#resurrect-and-the-history-journal).
+- `resurrect`: OpenCode sessions that left nothing else need the `sqlite3` program; Claude deletes old transcripts and cannot resume them (shown as `transcript gone`); a terminal opened without a Herdr space shows in the phone app and `hc ls` but not in the desktop app. See [docs/LIMITS.md](docs/LIMITS.md#resurrect-and-the-history-journal).
 - If you kill an agent you started by hand while its shell keeps running, herdr-wake treats it as a quit and does not resume it.
 - herdr-core releases every few days and has no stable API for this; a core update can break herdr-wake. Run `herdr-wake doctor` after updating core.
 

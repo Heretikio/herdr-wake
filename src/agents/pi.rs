@@ -242,6 +242,15 @@ fn expand_home(v: &str, home: &Path) -> PathBuf {
     }
 }
 
+/// The folder Pi keeps session files in by default:
+/// `PI_CODING_AGENT_SESSION_DIR` when set, else `<agent dir>/sessions`.
+pub fn sessions_root(env: &BTreeMap<String, String>, home: &Path) -> PathBuf {
+    match env.get("PI_CODING_AGENT_SESSION_DIR") {
+        Some(v) if !v.is_empty() => expand_home(v, home),
+        _ => agent_dir(env, home).join("sessions"),
+    }
+}
+
 /// The folders Pi keeps this record's session files in:
 /// `PI_CODING_AGENT_SESSION_DIR` when set, else
 /// `${PI_CODING_AGENT_DIR:-~/.pi/agent}/sessions`, from the record's

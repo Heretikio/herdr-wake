@@ -151,9 +151,11 @@ enum Cmd {
     #[command(
         long_about = "List closed agent sessions and bring one back in a new terminal.\n\n\
         With no argument, or a word to search for, it lists the sessions you closed, newest \
-        first, numbered: those herdr-wake recorded (with their exact flags), and, for \
-        Claude Code and Codex, sessions that only left a transcript (flags rebuilt from the \
-        transcript are marked). A session that is running is not listed. Every word must \
+        first, numbered: those herdr-wake recorded (with their exact flags), and sessions \
+        that only left their own files (Claude Code and Codex transcripts, Pi session files, \
+        OpenCode's database; flags rebuilt from the transcript are marked). The ENDED column \
+        says how it ended and how the conversation stood (finished, unanswered, interrupted, \
+        stopped mid-work). A session that is running is not listed. Every word must \
         appear in the title, folder, session id or agent name. A word made only of digits is \
         read as a number; --id names a session by an id that looks like one.\n\n\
         A number is a row of the last table listed in this terminal, good for an hour (--json \
@@ -197,6 +199,22 @@ enum Cmd {
         /// Resume a Claude Code session as a copy (--fork-session)
         #[arg(long)]
         fork: bool,
+        /// Print a summary of this session as JSON (Claude Code's own recap, a saved
+        /// summary, or one made now with the local claude, which uses a little of your
+        /// Claude usage)
+        #[arg(
+            long,
+            value_name = "SESSION-ID",
+            conflicts_with_all = ["target", "id", "print", "fork", "json", "prefetch_summaries"]
+        )]
+        summary: Option<String>,
+        /// Make the missing summaries of the first N sessions of the listing, one by one
+        #[arg(
+            long,
+            value_name = "N",
+            conflicts_with_all = ["target", "id", "print", "fork", "json"]
+        )]
+        prefetch_summaries: Option<usize>,
         /// Internal: runs in the terminal that was opened
         #[arg(long, hide = true, value_name = "KEY")]
         run: Option<String>,
@@ -322,6 +340,8 @@ pub fn main() -> i32 {
             id,
             print,
             fork,
+            summary,
+            prefetch_summaries,
             run: None,
         } => resurrect(ResurrectArgs {
             id,
@@ -333,6 +353,8 @@ pub fn main() -> i32 {
             json,
             print,
             fork,
+            summary,
+            prefetch_summaries,
         }),
     };
     match result {
@@ -967,6 +989,8 @@ struct ResurrectArgs {
     json: bool,
     print: bool,
     fork: bool,
+    summary: Option<String>,
+    prefetch_summaries: Option<usize>,
 }
 
 fn resurrect(a: ResurrectArgs) -> anyhow::Result<i32> {
@@ -996,6 +1020,18 @@ fn resurrect(a: ResurrectArgs) -> anyhow::Result<i32> {
     let (rows, up) = (collected.rows, collected.core_up);
     let now = s.platform.now_ms();
 
+    if a.summary.is_some() || a.prefetch_summaries.is_some() {
+        return crate::summary::run_cli(
+            a.summary.as_deref(),
+            a.prefetch_summaries,
+            &filter,
+            &rows,
+            &s.env,
+            &s.home,
+            &s.cfg,
+            &tools,
+        );
+    }
     let open_target = match a.target.as_deref() {
         _ if a.id.is_some() => a.id.as_deref(),
         Some(t)

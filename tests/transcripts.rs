@@ -495,14 +495,13 @@ fn codex_child_threads_and_non_interactive_runs_are_skipped() {
 }
 
 #[test]
-fn meta_of_reads_one_file_and_ignores_pi_and_opencode() {
+fn meta_of_reads_one_file_and_ignores_opencode() {
     let c = tempfile::tempdir().unwrap();
     let f = claude_file(c.path(), "p", ID);
     write_lines(&f, &[user("hello world")]);
     let mut cache = Cache::new();
     let got = transcripts::meta_of(AgentKind::Claude, &f, &mut cache).unwrap();
     assert_eq!(got.meta.title(), Some("hello world"));
-    assert!(transcripts::meta_of(AgentKind::Pi, &f, &mut cache).is_none());
     assert!(transcripts::meta_of(AgentKind::OpenCode, &f, &mut cache).is_none());
     assert!(
         transcripts::meta_of(AgentKind::Claude, &c.path().join("nope.jsonl"), &mut cache).is_none()
@@ -538,7 +537,7 @@ fn a_title_that_looks_like_a_credential_is_hidden_here_and_in_the_cache() {
     ] {
         assert!(!cached.contains(leak), "{leak} in the cache");
     }
-    assert_eq!(transcripts::CACHE_VERSION, 3);
+    assert_eq!(transcripts::CACHE_VERSION, 4);
 
     // Codex names go the same way.
     let h = tempfile::tempdir().unwrap();
