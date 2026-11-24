@@ -92,6 +92,15 @@ fn a_closed_session_is_listed_and_brought_back_in_a_new_terminal() {
         "{printed}"
     );
 
+    // The JSON listing is for scripts: it does not set the numbers.
+    let out = h.hw_env(&["resurrect", "1"], &[("PATH", &path(&h))]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no earlier listing"));
+    // The table does.
+    let table = h.hw_env(&["resurrect"], &[("PATH", &path(&h))]);
+    let text = String::from_utf8_lossy(&table.stdout).into_owned();
+    assert!(text.contains("claude") && text.contains("quit"), "{text}");
+
     // Bring it back by number, through a real `hc run`.
     let before = h.starts().len();
     let out = h.hw_env(&["resurrect", "1"], &[("PATH", &path(&h))]);

@@ -701,24 +701,65 @@ pub fn list_json(rows: &[&Row], now_ms: u64) -> serde_json::Value {
 
 // ------------------------------------------------------- the last listing
 
+/// How long a listing stays valid for numbers.
+const LAST_TTL_MS: u64 = 60 * 60 * 1000;
+
 #[derive(Serialize, Deserialize)]
 struct Last {
+    created_ms: u64,
     filter: Filter,
     sessions: Vec<(AgentKind, String)>,
 }
 
-fn last_file(env: &BTreeMap<String, String>, home: &Path) -> PathBuf {
-    paths::resurrect_dir(env, home).join("last.json")
+/// The terminal this process is attached to (`/dev/ttys003`), if any.
+fn current_tty() -> Option<String> {
+    // SAFETY: ttyname returns null or a NUL-terminated string that stays
+    // valid until the next call; it is copied out at once.
+    unsafe {
+        let p = libc::ttyname(0);
+        (!p.is_null()).then(|| std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned())
+    }
 }
 
-/// Stores the listing just shown, so a number can refer to it.
+/// The file that holds the last listing of this person's terminal: keyed by
+/// the herdr-core terminal (`HC_TERMINAL_ID`), else the tty, else one file
+/// for everything else, so two terminals never number each other's rows.
+fn last_file(env: &BTreeMap<String, String>, home: &Path) -> PathBuf {
+    let name = match env.get("HC_TERMINAL_ID").filter(|v| !v.is_empty()) {
+        Some(t) => format!("last-hc-{}.json", record::plain_name(t)),
+        None => match current_tty() {
+            Some(tty) => format!("last-tty-{}.json", record::plain_name(&tty)),
+            None => "last.json".to_string(),
+        },
+    };
+    paths::resurrect_dir(env, home).join(name)
+}
+
+/// Stores the listing just shown, so a number can refer to it, and removes
+/// listings of other terminals that are a day old.
 pub fn remember(
     env: &BTreeMap<String, String>,
     home: &Path,
+    now_ms: u64,
     filter: &Filter,
     rows: &[&Row],
 ) -> std::io::Result<()> {
+    if let Ok(files) = std::fs::read_dir(paths::resurrect_dir(env, home)) {
+        for f in files.flatten() {
+            let name = f.file_name().to_string_lossy().into_owned();
+            let old = f
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age.as_millis() > u128::from(LAST_TTL_MS) * 24);
+            if name.starts_with("last") && old {
+                let _ = std::fs::remove_file(f.path());
+            }
+        }
+    }
     let last = Last {
+        created_ms: now_ms,
         filter: filter.clone(),
         sessions: rows
             .iter()
@@ -731,20 +772,28 @@ pub fn remember(
 
 /// Picks the row a request names, among `rows` (open ones included):
 /// `target` is a number of the last listing, or a session id. A number
-/// refers to the last listing; when this request sets filters of its own
-/// (`filter`), they must be the ones that listing used.
+/// refers to the last listing of this terminal, for an hour; when this
+/// request sets filters of its own (`filter`), they must be the ones that
+/// listing used.
 pub fn resolve<'a>(
     rows: &'a [Row],
     target: &str,
     filter: &Filter,
     env: &BTreeMap<String, String>,
     home: &Path,
+    now_ms: u64,
 ) -> Result<&'a Row, String> {
     if let Ok(n) = target.parse::<usize>() {
         let last: Last = std::fs::read(last_file(env, home))
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .ok_or("there is no earlier listing: run `herdr-wake resurrect` first, then use a number from it")?;
+        if now_ms.saturating_sub(last.created_ms) > LAST_TTL_MS {
+            return Err(
+                "the last listing is more than an hour old, so its numbers may be out of date: run `herdr-wake resurrect` again"
+                    .to_string(),
+            );
+        }
         if !filter.is_empty()
             && (filter.scope != last.filter.scope || filter.agent != last.filter.agent)
         {

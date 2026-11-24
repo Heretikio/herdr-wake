@@ -763,12 +763,12 @@ fn a_number_means_a_row_of_the_last_listing() {
     let mut w = World::new();
     let rows = titled(&mut w);
     let (shown, _) = rs::select(&rows, &Filter::default(), 20);
-    rs::remember(&w.f.env, &w.f.home, &Filter::default(), &shown).unwrap();
+    rs::remember(&w.f.env, &w.f.home, w.now, &Filter::default(), &shown).unwrap();
 
-    let got = rs::resolve(&rows, "2", &Filter::default(), &w.f.env, &w.f.home).unwrap();
+    let got = rs::resolve(&rows, "2", &Filter::default(), &w.f.env, &w.f.home, w.now).unwrap();
     assert_eq!(got.id(), shown[1].id());
-    assert!(rs::resolve(&rows, "9", &Filter::default(), &w.f.env, &w.f.home).is_err());
-    assert!(rs::resolve(&rows, "0", &Filter::default(), &w.f.env, &w.f.home).is_err());
+    assert!(rs::resolve(&rows, "9", &Filter::default(), &w.f.env, &w.f.home, w.now).is_err());
+    assert!(rs::resolve(&rows, "0", &Filter::default(), &w.f.env, &w.f.home, w.now).is_err());
 }
 
 #[test]
@@ -780,25 +780,77 @@ fn a_number_with_other_filters_than_the_listing_is_refused() {
         ..Filter::default()
     };
     let (shown, _) = rs::select(&rows, &listed, 20);
-    rs::remember(&w.f.env, &w.f.home, &listed, &shown).unwrap();
+    rs::remember(&w.f.env, &w.f.home, w.now, &listed, &shown).unwrap();
 
     // The same filters, or none at all, work.
-    assert!(rs::resolve(&rows, "1", &listed, &w.f.env, &w.f.home).is_ok());
-    assert!(rs::resolve(&rows, "1", &Filter::default(), &w.f.env, &w.f.home).is_ok());
+    assert!(rs::resolve(&rows, "1", &listed, &w.f.env, &w.f.home, w.now).is_ok());
+    assert!(rs::resolve(&rows, "1", &Filter::default(), &w.f.env, &w.f.home, w.now).is_ok());
     // Other filters do not.
     let other = Filter {
         scope: Some(w.cwd()),
         ..Filter::default()
     };
-    let err = rs::resolve(&rows, "1", &other, &w.f.env, &w.f.home).unwrap_err();
+    let err = rs::resolve(&rows, "1", &other, &w.f.env, &w.f.home, w.now).unwrap_err();
     assert!(err.contains("other filters"), "{err}");
+}
+
+#[test]
+fn each_herdr_terminal_numbers_its_own_listing() {
+    let mut w = World::new();
+    let rows = titled(&mut w);
+    let (shown, _) = rs::select(&rows, &Filter::default(), 20);
+    let mut one = w.f.env.clone();
+    one.insert("HC_TERMINAL_ID".into(), "t1".into());
+    let mut two = w.f.env.clone();
+    two.insert("HC_TERMINAL_ID".into(), "t2".into());
+    rs::remember(&one, &w.f.home, w.now, &Filter::default(), &shown).unwrap();
+
+    assert!(rs::resolve(&rows, "1", &Filter::default(), &one, &w.f.home, w.now).is_ok());
+    let err = rs::resolve(&rows, "1", &Filter::default(), &two, &w.f.home, w.now).unwrap_err();
+    assert!(err.contains("no earlier listing"), "{err}");
+
+    // The other terminal lists something else: the first is not disturbed.
+    let narrow = Filter {
+        agent: Some(AgentKind::Codex),
+        ..Filter::default()
+    };
+    let (only_codex, _) = rs::select(&rows, &narrow, 20);
+    rs::remember(&two, &w.f.home, w.now, &narrow, &only_codex).unwrap();
+    let a = rs::resolve(&rows, "1", &Filter::default(), &one, &w.f.home, w.now).unwrap();
+    let b = rs::resolve(&rows, "1", &Filter::default(), &two, &w.f.home, w.now).unwrap();
+    assert_eq!(a.id(), shown[0].id());
+    assert_eq!(b.agent(), AgentKind::Codex);
+}
+
+#[test]
+fn a_listing_is_good_for_an_hour() {
+    let mut w = World::new();
+    let rows = titled(&mut w);
+    let (shown, _) = rs::select(&rows, &Filter::default(), 20);
+    rs::remember(&w.f.env, &w.f.home, w.now, &Filter::default(), &shown).unwrap();
+    let at = |later: u64| {
+        rs::resolve(
+            &rows,
+            "1",
+            &Filter::default(),
+            &w.f.env,
+            &w.f.home,
+            w.now + later,
+        )
+    };
+    assert!(at(HOUR).is_ok());
+    let err = at(HOUR + 1).unwrap_err();
+    assert!(
+        err.contains("more than an hour old") && err.contains("again"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_number_without_a_listing_is_an_error() {
     let mut w = World::new();
     let rows = titled(&mut w);
-    let err = rs::resolve(&rows, "1", &Filter::default(), &w.f.env, &w.f.home).unwrap_err();
+    let err = rs::resolve(&rows, "1", &Filter::default(), &w.f.env, &w.f.home, w.now).unwrap_err();
     assert!(err.contains("no earlier listing"), "{err}");
 }
 
@@ -808,10 +860,12 @@ fn a_session_id_is_found_and_an_unknown_one_is_not() {
     let rows = titled(&mut w);
     let f = Filter::default();
     assert_eq!(
-        rs::resolve(&rows, B, &f, &w.f.env, &w.f.home).unwrap().id(),
+        rs::resolve(&rows, B, &f, &w.f.env, &w.f.home, w.now)
+            .unwrap()
+            .id(),
         B
     );
-    assert!(rs::resolve(&rows, "nope", &f, &w.f.env, &w.f.home).is_err());
+    assert!(rs::resolve(&rows, "nope", &f, &w.f.env, &w.f.home, w.now).is_err());
 }
 
 #[test]
@@ -820,14 +874,14 @@ fn an_id_shared_by_two_agents_needs_the_agent() {
     w.journal(AgentKind::Claude, A, &[], HOUR, Ending::Quit);
     w.journal(AgentKind::Codex, A, &[], HOUR, Ending::Quit);
     let rows = w.rows();
-    let err = rs::resolve(&rows, A, &Filter::default(), &w.f.env, &w.f.home).unwrap_err();
+    let err = rs::resolve(&rows, A, &Filter::default(), &w.f.env, &w.f.home, w.now).unwrap_err();
     assert!(err.contains("--agent"), "{err}");
     let f = Filter {
         agent: Some(AgentKind::Codex),
         ..Filter::default()
     };
     assert_eq!(
-        rs::resolve(&rows, A, &f, &w.f.env, &w.f.home)
+        rs::resolve(&rows, A, &f, &w.f.env, &w.f.home, w.now)
             .unwrap()
             .agent(),
         AgentKind::Codex
@@ -968,7 +1022,7 @@ fn an_id_that_looks_like_a_number_is_found_by_resolve_id() {
     let f = Filter::default();
     assert_eq!(rs::resolve_id(&rows, "424242", &f).unwrap().id(), "424242");
     // `resolve` reads it as a row number, which the listing does not have.
-    assert!(rs::resolve(&rows, "424242", &f, &w.f.env, &w.f.home).is_err());
+    assert!(rs::resolve(&rows, "424242", &f, &w.f.env, &w.f.home, w.now).is_err());
     assert!(rs::resolve_id(&rows, "nope", &f).is_err());
 }
 

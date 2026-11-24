@@ -1016,7 +1016,11 @@ fn resurrect(a: ResurrectArgs) -> anyhow::Result<i32> {
                 "note: herdr-core is not running, so sessions open in it are not left out of this list"
             );
         }
-        let _ = rs::remember(&s.env, &s.home, &filter, &shown);
+        // The JSON listing is for scripts: it leaves the numbers of the last
+        // table you looked at alone.
+        if !a.json {
+            let _ = rs::remember(&s.env, &s.home, now, &filter, &shown);
+        }
         if a.json {
             println!(
                 "{}",
@@ -1034,7 +1038,7 @@ fn resurrect(a: ResurrectArgs) -> anyhow::Result<i32> {
     let row = if a.id.is_some() {
         rs::resolve_id(&rows, target, &filter)
     } else {
-        rs::resolve(&rows, target, &filter, &s.env, &s.home)
+        rs::resolve(&rows, target, &filter, &s.env, &s.home, now)
     }
     .map_err(|e| anyhow!(e))?;
     let launch = rs::prepare(row, &mut s.ctx(&mut core), a.fork).map_err(|e| anyhow!(e))?;
