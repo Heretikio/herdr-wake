@@ -1289,7 +1289,7 @@ pub fn run_entry(platform: &dyn Platform, env: BTreeMap<String, String>, key: &s
         Ok(c) => Box::new(c),
         Err(_) => Box::new(crate::report::NoCore),
     };
-    let tools = SystemTools { env: env.clone() };
+    let tools = SystemTools::new(env.clone());
     let err = run_ticket(platform, &env, &home, key, core.as_mut(), &tools, &say);
     let _ = writeln!(std::io::stderr(), "herdr-wake: cannot start a shell: {err}");
     std::process::exit(1)
@@ -1371,9 +1371,22 @@ fn run_capture(program: &Path, args: &[String], timeout: Duration) -> Option<Cap
 /// `Tools` on the real machine.
 pub struct SystemTools {
     pub env: BTreeMap<String, String>,
+    /// How long `hc run` may take.
+    pub hc_timeout: Duration,
+    /// How long `herdr-app ls` may take.
+    pub app_timeout: Duration,
 }
 
 impl SystemTools {
+    /// The tools of the environment `env`, with the usual time limits.
+    pub fn new(env: BTreeMap<String, String>) -> SystemTools {
+        SystemTools {
+            env,
+            hc_timeout: HC_TIMEOUT,
+            app_timeout: HERDR_APP_TIMEOUT,
+        }
+    }
+
     /// `name` as found on `PATH`, when it passes the same check a
     /// configured program does: a regular executable file that you or root
     /// own and that group and others cannot write.
@@ -1389,14 +1402,14 @@ impl SystemTools {
 impl Tools for SystemTools {
     fn herdr_app_ls(&self) -> Option<String> {
         let app = self.program("herdr-app").ok()?;
-        let out = run_capture(&app, &["ls".to_string()], HERDR_APP_TIMEOUT)?;
+        let out = run_capture(&app, &["ls".to_string()], self.app_timeout)?;
         (out.code == Some(0)).then_some(out.stdout)
     }
 
     fn hc(&self, args: &[String]) -> Result<String, String> {
         let hc = self.program("hc")?;
-        let out = run_capture(&hc, args, HC_TIMEOUT)
-            .ok_or_else(|| format!("hc did not finish within {} s", HC_TIMEOUT.as_secs()))?;
+        let out = run_capture(&hc, args, self.hc_timeout)
+            .ok_or_else(|| format!("hc did not finish within {} s", self.hc_timeout.as_secs()))?;
         if out.code == Some(0) {
             Ok(out.stdout)
         } else {

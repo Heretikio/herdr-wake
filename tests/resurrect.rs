@@ -1759,3 +1759,84 @@ fn a_command_that_cannot_be_shown_safely_is_refused() {
     r.entry.cwd = odd;
     assert!(rs::prepare(&r, &mut w.f.ctx(), false).is_err());
 }
+
+// ------------------------------------------------ the real tools, safely
+
+/// A folder of fake `hc` and `herdr-app` programs, as a PATH.
+fn tool_dir(hc: &str, hc_mode: u32) -> (tempfile::TempDir, BTreeMap<String, String>) {
+    let d = tempfile::tempdir().unwrap();
+    let write = |name: &str, body: &str, mode: u32| {
+        let p = d.path().join(name);
+        std::fs::write(&p, body).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    write("hc", hc, hc_mode);
+    write("herdr-app", "#!/bin/sh\necho '{\"spaces\":[]}'\n", 0o755);
+    let mut env = BTreeMap::new();
+    env.insert("PATH".to_string(), d.path().display().to_string());
+    (d, env)
+}
+
+#[test]
+fn hc_and_herdr_app_must_pass_the_program_safety_check() {
+    let args = vec!["run".to_string()];
+    // A good hc.
+    let (_d, env) = tool_dir("#!/bin/sh\necho t5\n", 0o755);
+    assert_eq!(rs::SystemTools::new(env).hc(&args).unwrap().trim(), "t5");
+
+    // Writable by the group: not run.
+    let (_d, env) = tool_dir("#!/bin/sh\necho t5\n", 0o775);
+    let err = rs::SystemTools::new(env).hc(&args).unwrap_err();
+    assert!(
+        err.contains("not safe to run") && err.contains("writable by group"),
+        "{err}"
+    );
+
+    // Not executable.
+    let (_d, env) = tool_dir("#!/bin/sh\necho t5\n", 0o644);
+    assert!(rs::SystemTools::new(env).hc(&args).is_err());
+
+    // Missing.
+    let env: BTreeMap<_, _> = [("PATH".to_string(), "/nonexistent".to_string())].into();
+    let err = rs::SystemTools::new(env.clone()).hc(&args).unwrap_err();
+    assert!(err.contains("cannot find hc"), "{err}");
+    assert_eq!(rs::SystemTools::new(env).herdr_app_ls(), None);
+
+    // A herdr-app that is not safe is treated as absent.
+    let (d, env) = tool_dir("#!/bin/sh\n", 0o755);
+    assert!(rs::SystemTools::new(env.clone()).herdr_app_ls().is_some());
+    std::fs::set_permissions(
+        d.path().join("herdr-app"),
+        std::fs::Permissions::from_mode(0o777),
+    )
+    .unwrap();
+    assert_eq!(rs::SystemTools::new(env).herdr_app_ls(), None);
+}
+
+#[test]
+fn a_failing_hc_reports_its_first_error_line_and_a_slow_one_is_stopped() {
+    let args = vec!["run".to_string()];
+    let (_d, env) = tool_dir("#!/bin/sh\necho 'no such space' >&2\nexit 3\n", 0o755);
+    let err = rs::SystemTools::new(env).hc(&args).unwrap_err();
+    assert_eq!(err, "hc failed: no such space");
+
+    let (_d, env) = tool_dir("#!/bin/sh\nsleep 30\n", 0o755);
+    let mut tools = rs::SystemTools::new(env.clone());
+    tools.hc_timeout = std::time::Duration::from_millis(300);
+    let started = std::time::Instant::now();
+    let err = tools.hc(&args).unwrap_err();
+    assert!(err.contains("did not finish"), "{err}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+
+    let (_d, env) = tool_dir("#!/bin/sh\n", 0o755);
+    std::fs::write(
+        std::path::Path::new(&env["PATH"]).join("herdr-app"),
+        "#!/bin/sh\nsleep 30\n",
+    )
+    .unwrap();
+    let mut tools = rs::SystemTools::new(env);
+    tools.app_timeout = std::time::Duration::from_millis(300);
+    let started = std::time::Instant::now();
+    assert_eq!(tools.herdr_app_ls(), None);
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}

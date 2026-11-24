@@ -169,8 +169,9 @@ $ herdr-wake resurrect --json              # the same list for scripts
 ```
 
 - **Where the list comes from.** herdr-wake keeps a small private file per recorded session in `~/.local/state/herdr-wake/history/` (agent, session id, folder, the exact flags, program, the environment allowlist, when it started and how it ended: quit, killed, replaced by a new session in the same terminal, forgotten, or unknown). Sessions from before you installed, or run outside Herdr, are read from Claude Code's and Codex's own transcripts (`~/.claude/projects`, `~/.codex/sessions`; only the first and last 128 KB of each file). For those, flags are rebuilt from the transcript and the row says `transcript`: Claude's first recorded permission mode becomes `--dangerously-skip-permissions` or `--permission-mode <mode>`, Codex gets no flags. Pi and OpenCode are listed only from the journal. `history_limit` in `config.toml` caps the journal (default 500).
-- **A session that is running is not listed**: a live record on a Herdr terminal (when core is running; `resurrect` never starts it), a Claude session file whose process is alive, or an agent whose command line names the session.
-- **A number is a row of the last listing** (a word made only of digits is read as a number). If you give filters with the number they must be the ones that listing used.
+- **A session that is running is not listed**: a live record on a Herdr terminal (when core is running; `resurrect` never starts it), a Claude session file whose process is alive, a Codex rollout that a running Codex holds open (`lsof` on macOS, `/proc` on Linux), an agent whose command line names the session, or a session file written in the last two minutes. It does not guess from the folder. `--fork` still works on a running Claude session (a fork is safe); a plain resume of one is refused.
+- **A number is a row of the last table you listed in this terminal**, for one hour (a word made only of digits is read as a number; `--id <SESSION-ID>` names an id that looks like one). `--json` does not set the numbers. If you give filters with the number they must be the ones that listing used. Each Herdr terminal (and each tty) has its own listing.
+- **What is shown.** The table, `--json` and the line printed after opening show flag names only (plus the values of `--permission-mode`, `--model`, `-s/--sandbox` and `-a/--ask-for-approval`); `--print` and the "To retry" line carry the exact command, because they have to run. A title that looks like it holds a credential (it contains `key`, `token`, `secret`, `password`, `auth` or `bearer`) is replaced by `(title hidden: looks like a credential)`, also in the transcript cache. A folder or flag with control or direction-changing characters is refused, not printed.
 - **Bypass flags are replayed**, because you started this. `restore_bypass = false` still drops them, and the folder must pass the same safety check as at wake time. Resurrect checks the session id, that the session is not running, the folder, the program, and that the agent's session file exists, and tells you which check failed.
 - **Where the terminal appears.** Run from a Herdr terminal, it joins that terminal's space. Otherwise it joins the space whose folder holds the session, when the desktop app is open (`herdr-app ls`). With neither, the terminal has no space label: the phone app and `hc ls` show it, the desktop app does not.
 - **Claude deletes old transcripts** (after 30 days unless `cleanupPeriodDays` in its `settings.json` says otherwise) and cannot resume a session whose transcript is gone. Such rows say `transcript gone`. `herdr-wake doctor` tells you the current setting.
@@ -375,9 +376,11 @@ Options:
 $ herdr-wake resurrect --help
 List closed agent sessions and bring one back in a new terminal.
 
-With no argument, or a word to search for, it lists the sessions you closed, newest first, numbered: those herdr-wake recorded (with their exact flags), and, for Claude Code and Codex, sessions that only left a transcript (flags rebuilt from the transcript are marked). A session that is running is not listed. Every word must appear in the title, folder, session id or agent name. A word made only of digits is read as a number.
+With no argument, or a word to search for, it lists the sessions you closed, newest first, numbered: those herdr-wake recorded (with their exact flags), and, for Claude Code and Codex, sessions that only left a transcript (flags rebuilt from the transcript are marked). A session that is running is not listed. Every word must appear in the title, folder, session id or agent name. A word made only of digits is read as a number; --id names a session by an id that looks like one.
 
-With a number from the last listing, or a session id, it checks the session the way a wake does (valid id, folder exists and is safe, program is safe, session file exists) and opens a new herdr-core terminal in the session's folder that resumes it. The recorded flags are replayed, a permission bypass included, because you asked; `restore_bypass = false` in config.toml still drops them. --print prints the command instead (`cd <folder> && <command>`). --fork resumes a Claude Code session as a copy.
+A number is a row of the last table listed in this terminal, good for an hour (--json does not set it).
+
+With a number or a session id, it checks the session the way a wake does (valid id, folder exists and is safe, program is safe, session file exists) and opens a new herdr-core terminal in the session's folder that resumes it. The recorded flags are replayed, a permission bypass included, because you asked; `restore_bypass = false` in config.toml still drops them. --print prints the command instead (`cd <folder> && <command>`). --fork resumes a Claude Code session as a copy, also one that is running.
 
 The terminal belongs to a Herdr space when one can be found; without one it shows in the phone app and `hc ls` but not in the desktop app.
 
@@ -406,6 +409,9 @@ Options:
 
       --json
           Print the listing as JSON
+
+      --id <SESSION-ID>
+          Bring back the session with this id (for an id that looks like a number)
 
       --print
           Print the command that brings the session back instead of opening a terminal

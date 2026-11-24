@@ -155,14 +155,16 @@ enum Cmd {
         Claude Code and Codex, sessions that only left a transcript (flags rebuilt from the \
         transcript are marked). A session that is running is not listed. Every word must \
         appear in the title, folder, session id or agent name. A word made only of digits is \
-        read as a number.\n\n\
-        With a number from the last listing, or a session id, it checks the session the way \
+        read as a number; --id names a session by an id that looks like one.\n\n\
+        A number is a row of the last table listed in this terminal, good for an hour (--json \
+        does not set it).\n\n\
+        With a number or a session id, it checks the session the way \
         a wake does (valid id, folder exists and is safe, program is safe, session file \
         exists) and opens a new herdr-core terminal in the session's folder that resumes \
         it. The recorded flags are replayed, a permission bypass included, because you \
         asked; `restore_bypass = false` in config.toml still drops them. \
         --print prints the command instead (`cd <folder> && <command>`). --fork resumes a \
-        Claude Code session as a copy.\n\n\
+        Claude Code session as a copy, also one that is running.\n\n\
         The terminal belongs to a Herdr space when one can be found; without one it shows \
         in the phone app and `hc ls` but not in the desktop app.\n\n\
         Reads herdr-core's socket to leave out running sessions and never starts herdr-core \
@@ -989,7 +991,7 @@ fn resurrect(a: ResurrectArgs) -> anyhow::Result<i32> {
         agent,
     };
     let mut core = s.core();
-    let tools = rs::SystemTools { env: s.env.clone() };
+    let tools = rs::SystemTools::new(s.env.clone());
     let collected = rs::collect(&mut s.ctx(&mut core), &tools);
     let (rows, up) = (collected.rows, collected.core_up);
     let now = s.platform.now_ms();
