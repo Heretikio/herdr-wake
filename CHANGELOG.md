@@ -11,6 +11,8 @@ All notable changes to herdr-wake. The format follows [Keep a Changelog](https:/
 - **Transcript fallback.** Sessions the journal does not know (from before install, or run outside Herdr) are read from Claude Code's and Codex's own transcripts: the first and last 128 KB of each file, cached by size and modification time. Flags there are rebuilt from Claude's first recorded permission mode and marked as from the transcript; Codex gets none. Pi and OpenCode have no fallback yet.
 - **`doctor`** says how long Claude Code keeps transcripts (`cleanupPeriodDays`, 30 days by default) and that `resurrect` cannot bring back a session whose transcript is gone. Information only, never a failure.
 
+- **A Sessions panel for the Herdr desktop app** (`mods/herdr-wake-sessions/`): the closed sessions in a side panel with scope switch, filter, session facts, Resume, Fork and Copy. New for it: `resurrect --space <SPACE-ID>` (the new terminal joins that space, ahead of the guesses), `resurrect --ticket` (checks and writes the launch ticket, opens nothing, prints `{key, argv, cwd, title, space}`), `transcript`, `folder_exists` and `ended_ms` in `--json`, and the tab `hc run` opens is renamed after the session title when the app is open.
+
 ### Fixed
 
 - **A relative `CLAUDE_CONFIG_DIR` in a recorded environment** is read under the session's folder by Claude's resume check, as Codex's `CODEX_HOME` already was (before, it was read under the folder of whoever ran the check).

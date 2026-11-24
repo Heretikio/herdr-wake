@@ -206,7 +206,8 @@ fn resurrect_help_lists_its_options_and_hides_the_internal_one() {
     let out = bin().args(["resurrect", "--help"]).output().unwrap();
     let text = String::from_utf8(out.stdout).unwrap();
     for word in [
-        "--here", "--folder", "--agent", "--limit", "--json", "--print", "--fork",
+        "--here", "--folder", "--agent", "--limit", "--json", "--print", "--fork", "--space",
+        "--ticket",
     ] {
         assert!(text.contains(word), "{word} missing:\n{text}");
     }
@@ -252,6 +253,11 @@ fn resurrect_refuses_what_makes_no_sense() {
     let out = resurrect(h, &["--id", "123", "something"]);
     assert_eq!(out.status.code(), Some(2), "--id and a target do not mix");
     assert!(err(&["--id", "123", "--print"]).contains("no session with the id"));
+    // A space id is plain characters; anything else is refused before anything runs.
+    for bad in ["a b", "a=b", "x\u{1b}y", ""] {
+        let out = resurrect(h, &["--id", "123", "--space", bad]);
+        assert_eq!(out.status.code(), Some(2), "{bad:?}");
+    }
 }
 
 #[test]
@@ -339,6 +345,46 @@ fn resurrect_print_gives_the_command_for_a_journaled_session() {
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("herdr-core is not running"));
+
+    // --ticket checks the session and writes the ticket, opens nothing, and
+    // needs no core: the desktop panel opens the tab itself.
+    let out = bin()
+        .args(["resurrect", "--ticket", "--space", "sp1_a", id])
+        .env("HOME", home.path())
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let t: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let key = t["key"].as_str().unwrap();
+    assert!(!key.is_empty());
+    assert_eq!(t["argv"][1], "resurrect");
+    assert_eq!(t["argv"][2], "--run");
+    assert_eq!(t["argv"][3], key);
+    assert_eq!(t["cwd"], work.path().to_str().unwrap());
+    assert_eq!(t["title"], "hi");
+    assert_eq!(t["space"], "sp1_a");
+    // The same session again is refused while that ticket is pending.
+    let out = bin()
+        .args(["resurrect", "--ticket", id])
+        .env("HOME", home.path())
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("already pending"));
+    // --ticket and --print do not mix.
+    let out = bin()
+        .args(["resurrect", "--ticket", "--print", id])
+        .env("HOME", home.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
 }
 
 #[test]

@@ -74,6 +74,16 @@ pub enum Transcript {
     Unknown,
 }
 
+impl Transcript {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Transcript::Present => "present",
+            Transcript::Gone => "gone",
+            Transcript::Unknown => "unknown",
+        }
+    }
+}
+
 /// One session that can be listed.
 #[derive(Debug, Clone)]
 pub struct Row {
@@ -696,6 +706,9 @@ pub fn list_json(rows: &[&Row], now_ms: u64) -> serde_json::Value {
                 "flags_from_transcript": r.flags_from_transcript,
                 "source": r.source.as_str(),
                 "transcript_gone": r.transcript == Transcript::Gone,
+                "transcript": r.transcript.as_str(),
+                "folder_exists": r.entry.cwd.is_dir(),
+                "ended_ms": if r.source == Source::Wake { r.entry.ended_ms } else { None },
             })
         })
         .collect();
@@ -1491,6 +1504,10 @@ pub trait Tools {
     fn hc(&self, args: &[String]) -> Result<String, String>;
     /// The rollout files that a running Codex has open.
     fn codex_open_files(&self) -> Vec<PathBuf>;
+    /// Runs `herdr-app do <args>` (the desktop app is open). `Err` says why not.
+    fn herdr_app_do(&self, _args: &[String]) -> Result<String, String> {
+        Err("herdr-app is not available".to_string())
+    }
 }
 
 /// How long `hc run` may take.
@@ -1590,6 +1607,22 @@ impl Tools for SystemTools {
         let app = self.program("herdr-app").ok()?;
         let out = run_capture(&app, &["ls".to_string()], self.app_timeout)?;
         (out.code == Some(0)).then_some(out.stdout)
+    }
+
+    fn herdr_app_do(&self, args: &[String]) -> Result<String, String> {
+        let app = self.program("herdr-app")?;
+        let mut argv = vec!["do".to_string()];
+        argv.extend(args.iter().cloned());
+        let out = run_capture(&app, &argv, self.app_timeout)
+            .ok_or_else(|| "herdr-app did not finish in time".to_string())?;
+        if out.code == Some(0) {
+            Ok(out.stdout)
+        } else {
+            Err(format!(
+                "herdr-app failed: {}",
+                trust::printable(out.stderr.lines().next().unwrap_or(""))
+            ))
+        }
     }
 
     fn hc(&self, args: &[String]) -> Result<String, String> {
@@ -1802,8 +1835,34 @@ pub struct Opened {
     pub space: Option<String>,
 }
 
+/// True when `id` can be a Herdr space id for a `herdr.space` label: ASCII
+/// letters and digits, `-` and `_`, 1 to 64 characters.
+pub fn valid_space_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// The space the new terminal joins: the one the caller names (`--space`,
+/// from the desktop panel) when there is one, otherwise `find_space`'s guess.
+pub fn choose_space(
+    explicit: Option<&str>,
+    tools: &dyn Tools,
+    core: &mut dyn Core,
+    env: &BTreeMap<String, String>,
+    home: &Path,
+    folder: &Path,
+) -> Option<String> {
+    match explicit {
+        Some(id) => Some(id.to_string()),
+        None => find_space(tools, core, env, home, folder),
+    }
+}
+
 /// Opens a new herdr-core terminal in the session's folder that runs
-/// `herdr-wake resurrect --run <key>`.
+/// `herdr-wake resurrect --run <key>`, in the space `find_space` finds.
 pub fn open_terminal(
     tools: &dyn Tools,
     core: &mut dyn Core,
@@ -1814,6 +1873,20 @@ pub fn open_terminal(
     key: &str,
 ) -> Result<Opened, String> {
     let space = find_space(tools, core, env, home, folder);
+    open_terminal_in(tools, space, folder, exe, key, None)
+}
+
+/// As `open_terminal`, in `space` (labelled `herdr.space`) or in none. With a
+/// `title` and a space, the tab the app makes for the terminal is renamed to
+/// it (best effort: the app may not be open or may be slow to adopt it).
+pub fn open_terminal_in(
+    tools: &dyn Tools,
+    space: Option<String>,
+    folder: &Path,
+    exe: &Path,
+    key: &str,
+    title: Option<&str>,
+) -> Result<Opened, String> {
     let args = hc_run_args(folder, space.as_deref(), exe, key);
     let out = tools.hc(&args)?;
     let terminal = out
@@ -1822,5 +1895,61 @@ pub fn open_terminal(
         .find(|l| !l.is_empty())
         .map(trust::printable)
         .unwrap_or_default();
+    if let (Some(title), Some(_)) = (title, space.as_deref()) {
+        rename_tab_of(tools, &terminal, title);
+    }
     Ok(Opened { terminal, space })
+}
+
+/// A tab name from a session title: one line, at most 60 characters.
+pub fn tab_name(title: &str) -> Option<String> {
+    let name = cut(&one_line(title), 60);
+    (!name.is_empty()).then_some(name)
+}
+
+/// Names the app's tab that holds `terminal` (the first word of what `hc run`
+/// printed) after `title`. The app adopts a labelled terminal a moment after
+/// `hc run` returns, so this looks a few times.
+fn rename_tab_of(tools: &dyn Tools, terminal: &str, title: &str) {
+    let Some(want) = terminal.split_whitespace().next() else {
+        return;
+    };
+    let Some(name) = tab_name(title) else {
+        return;
+    };
+    for attempt in 0..10 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let Some(ls) = tools.herdr_app_ls() else {
+            return;
+        };
+        let Ok(ls) = serde_json::from_str::<serde_json::Value>(&ls) else {
+            return;
+        };
+        let tab = ls
+            .get("spaces")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .flat_map(|sp| {
+                sp.get("tabs")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+            })
+            .find(|tab| {
+                tab.get("terminals")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                    .any(|t| t.get("terminal").and_then(|v| v.as_str()) == Some(want))
+            })
+            .and_then(|tab| tab.get("id").and_then(|v| v.as_str()));
+        if let Some(id) = tab {
+            let arg = serde_json::json!({ "id": id, "name": name }).to_string();
+            let _ = tools.herdr_app_do(&["tab.rename".to_string(), arg]);
+            return;
+        }
+    }
 }

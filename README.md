@@ -174,8 +174,27 @@ $ herdr-wake resurrect --json              # the same list for scripts
 - **What is shown.** The table, `--json` and the line printed after opening show flag names only (plus the values of `--permission-mode`, `--model`, `-s/--sandbox` and `-a/--ask-for-approval`); `--print` and the "To retry" line carry the exact command, because they have to run. A title that seems to hold a secret value (a word shaped like an API key or token, such as `sk-...` or `ghp_...`, an assignment such as `password=...`, or a long random-looking string) is replaced by `(title hidden: looks like a credential)`, also in the transcript cache. Titles that only mention keys or auth stay visible. A folder or flag with control or direction-changing characters is refused, not printed.
 - **Bypass flags are replayed**, because you started this. `restore_bypass = false` still drops them, and the folder must pass the same safety check as at wake time. Resurrect checks the session id, that the session is not running, the folder, the program, and that the agent's session file exists, and tells you which check failed.
 - **Where the terminal appears.** Run from a Herdr terminal, it joins that terminal's space. Otherwise it joins the space whose folder holds the session, when the desktop app is open (`herdr-app ls`). With neither, the terminal has no space label: the phone app and `hc ls` show it, the desktop app does not.
+- **A named space.** `--space <SPACE-ID>` puts the new terminal in that Herdr space (the `herdr.space` label) and wins over the guesses above; the id is 1 to 64 letters, digits, `-` or `_`.
+- **`--ticket`** does every check and writes the launch ticket but opens nothing. It prints JSON `{key, argv, cwd, title, space}`: a program that opens the terminal itself (the desktop panel below) runs `argv` in a terminal of its own, in `cwd`, and names the tab after `title`. The ticket lapses after 10 minutes. When herdr-wake opens the terminal itself (`hc run`), it also renames the app's tab after the session title, best effort.
 - **Claude deletes old transcripts** (after 30 days unless `cleanupPeriodDays` in its `settings.json` says otherwise) and cannot resume a session whose transcript is gone. Such rows say `transcript gone`. `herdr-wake doctor` tells you the current setting.
 - The agent's own hook records the resurrected session in its new terminal as for any session you start, so it comes back after the next reboot too.
+
+### The Sessions panel (Herdr desktop app)
+
+`mods/herdr-wake-sessions/` is a side-panel mod for the Herdr desktop app (`herdr-app`): the closed sessions in one list, newest first, so nobody has to use the command line. It only calls `herdr-wake resurrect`; it reads no transcript itself.
+
+- **List.** A scope switch (This folder, This space, All spaces), a filter box, and one row per session: agent icon, where it ran (`repo > space`), the title, its age, and a yellow dot when it stopped mid-work. This space is the focused space's git repository (worktrees included), or its folder; when that is your home folder it holds nearly everything, so the panel starts on All spaces. A click opens the session with its facts (agent, folder, started, ended and how, flag names with a `!` for a permission bypass, where the row came from, whether the agent's session file is still there, the session id, and, when herdr-wake has them, branch, duration, cost, changes, models, pull requests and a summary).
+- **Resume** runs `herdr-wake resurrect --id <ID> --space <focused space> --ticket`, then opens a tab named after the title, in the session's folder, in the focused space, running the ticket. Any refusal from herdr-wake (folder missing, session running, unsafe folder, and so on) is shown in the panel. **Fork** does the same for a Claude Code session as a copy. **Copy** (or a right-click on a row) copies the session id, the resume command (`herdr-wake resurrect --id <ID> --print`) or the folder.
+- **Install.** Copy the folder, then make your own copies of the layout and tab bar as the [herdr-sessions](https://github.com/inlet/herdr-sessions) README describes (an existing custom layout is edited, not replaced):
+
+  ```sh
+  cp -R mods/herdr-wake-sessions ~/.config/herdr-app/mods/
+  herdr-app check ~/.config/herdr-app/mods/herdr-wake-sessions
+  herdr-app do mod.clone '{"name":"tabs","as":"my-tabs"}'
+  ```
+
+  In your layout file, set the `tabs` block's content to `{ "mod": "my-tabs" }` and add `{ "id": "herdr-wake-sessions-panel", "type": "block", "content": { "mod": "herdr-wake-sessions" } }` to the children of the `panel-body` stack. In `my-tabs/main.js`, add `"herdr-wake-sessions-panel"` to the `enabled` list and `.child(panelButton("herdr-wake-sessions-panel", "Sessions", "mods/herdr-wake-sessions/history.svg"))` after the Changes button. The block id and the mod folder name are part of the paths, so keep them.
+- **Needs** `herdr-wake` at `~/.local/bin/herdr-wake` (or on the app's `PATH`) and `git`. Local spaces only. `node mods/herdr-wake-sessions/test_logic.mjs` runs the panel's own tests. The look and parts of the code are adapted from [herdr-sessions](https://github.com/inlet/herdr-sessions) (MIT, see `mods/herdr-wake-sessions/LICENSE-THIRD-PARTY` and `ICONS-LICENSE.txt`).
 
 ## Commands
 
@@ -380,9 +399,9 @@ With no argument, or a word to search for, it lists the sessions you closed, new
 
 A number is a row of the last table listed in this terminal, good for an hour (--json does not set it).
 
-With a number or a session id, it checks the session the way a wake does (valid id, folder exists and is safe, program is safe, session file exists) and opens a new herdr-core terminal in the session's folder that resumes it. The recorded flags are replayed, a permission bypass included, because you asked; `restore_bypass = false` in config.toml still drops them. --print prints the command instead (`cd <folder> && <command>`). --fork resumes a Claude Code session as a copy, also one that is running.
+With a number or a session id, it checks the session the way a wake does (valid id, folder exists and is safe, program is safe, session file exists) and opens a new herdr-core terminal in the session's folder that resumes it. The recorded flags are replayed, a permission bypass included, because you asked; `restore_bypass = false` in config.toml still drops them. --print prints the command instead (`cd <folder> && <command>`). --ticket checks and writes the launch ticket but opens nothing, printing JSON for a program that opens the terminal itself. --fork resumes a Claude Code session as a copy, also one that is running.
 
-The terminal belongs to a Herdr space when one can be found; without one it shows in the phone app and `hc ls` but not in the desktop app.
+The terminal belongs to a Herdr space when one can be found; --space <SPACE-ID> names it (the desktop panel does), and wins over the guesses. Without a space it shows in the phone app and `hc ls` but not in the desktop app.
 
 Reads herdr-core's socket to leave out running sessions and never starts herdr-core itself. Run it as your own user, never as root.
 
@@ -413,8 +432,14 @@ Options:
       --id <SESSION-ID>
           Bring back the session with this id (for an id that looks like a number)
 
+      --space <SPACE-ID>
+          Herdr space id the new terminal joins (label herdr.space); the desktop panel passes it
+
       --print
           Print the command that brings the session back instead of opening a terminal
+
+      --ticket
+          Check the session and write its launch ticket, but open nothing: prints JSON {key, argv, cwd, title, space} for a program that opens the terminal itself (the desktop panel). The ticket lapses after 10 minutes if nothing runs it
 
       --fork
           Resume a Claude Code session as a copy (--fork-session)

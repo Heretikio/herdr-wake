@@ -1413,6 +1413,180 @@ fn a_home_or_root_space_holds_only_sessions_exactly_there() {
 }
 
 #[test]
+fn a_named_space_beats_the_terminal_and_folder_guesses() {
+    let mut w = World::new();
+    let mut here = Terminal::new("t7");
+    here.labels.insert("herdr.space".into(), "sp-here".into());
+    w.f.core.insert(here);
+    w.f.env.insert("HC_TERMINAL_ID".into(), "t7".into());
+    let tools = FakeTools {
+        ls: app_ls(json!([
+            {"id":"sp-work","name":"work","folder":w.cwd(),"machine":null,"active":true,"tabs":[]},
+        ])),
+        hc_out: Ok("t12\n".into()),
+        calls: RefCell::default(),
+        codex_open: Vec::new(),
+    };
+    let cwd = w.cwd();
+    let space = rs::choose_space(
+        Some("sp-panel_1"),
+        &tools,
+        &mut w.f.core,
+        &w.f.env,
+        &w.f.home,
+        &cwd,
+    );
+    assert_eq!(space.as_deref(), Some("sp-panel_1"));
+    // Without one, the terminal's own space wins as before.
+    let guessed = rs::choose_space(None, &tools, &mut w.f.core, &w.f.env, &w.f.home, &cwd);
+    assert_eq!(guessed.as_deref(), Some("sp-here"));
+    let opened = rs::open_terminal_in(
+        &tools,
+        space,
+        &cwd,
+        Path::new("/b/herdr-wake"),
+        "key-2",
+        None,
+    )
+    .unwrap();
+    assert_eq!(opened.space.as_deref(), Some("sp-panel_1"));
+    let calls = tools.calls.borrow();
+    assert!(calls[0]
+        .windows(2)
+        .any(|p| p == ["--label", "herdr.space=sp-panel_1"]));
+    assert!(!calls[0].iter().any(|a| a.contains("sp-here")));
+}
+
+#[test]
+fn a_space_id_is_plain_characters_only() {
+    for ok in [
+        "sp7ca99d146c9cd3e17fe081cbf0f1a940",
+        "a",
+        "sp-1_B",
+        &"x".repeat(64),
+    ] {
+        assert!(rs::valid_space_id(ok), "{ok}");
+    }
+    for bad in [
+        "",
+        " ",
+        "a b",
+        "a=b",
+        "sp\u{1b}[2J",
+        "a\nb",
+        "../x",
+        "a,b",
+        "\u{e9}",
+        &"x".repeat(65),
+    ] {
+        assert!(!rs::valid_space_id(bad), "{bad:?}");
+    }
+}
+
+#[test]
+fn the_json_listing_has_what_the_panel_needs() {
+    let mut w = World::new();
+    w.journal(AgentKind::Claude, A, &[], HOUR, Ending::Quit);
+    let rows = w.rows();
+    let (shown, _) = rs::select(&rows, &Filter::default(), 20);
+    let j = rs::list_json(&shown, w.now);
+    let first = &j["sessions"][0];
+    assert_eq!(first["transcript"], "gone");
+    assert_eq!(first["folder_exists"], true);
+    assert!(first["ended_ms"].is_u64(), "{first}");
+
+    let mut w = World::new();
+    let cwd = w.cwd();
+    w.claude_transcript(A, &[user(&cwd, "hello")]);
+    let rows = w.rows();
+    let (shown, _) = rs::select(&rows, &Filter::default(), 20);
+    let j = rs::list_json(&shown, w.now);
+    let first = &j["sessions"][0];
+    assert_eq!(first["source"], "transcript");
+    assert_eq!(first["transcript"], "present");
+    assert!(first["ended_ms"].is_null());
+}
+
+/// Tools that show one app tab for the new terminal and record renames.
+struct AppTools {
+    ls: String,
+    did: RefCell<Vec<Vec<String>>>,
+}
+
+impl Tools for AppTools {
+    fn herdr_app_ls(&self) -> Option<String> {
+        Some(self.ls.clone())
+    }
+    fn hc(&self, _args: &[String]) -> Result<String, String> {
+        Ok("t12 started\n".to_string())
+    }
+    fn codex_open_files(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
+    fn herdr_app_do(&self, args: &[String]) -> Result<String, String> {
+        self.did.borrow_mut().push(args.to_vec());
+        Ok(String::new())
+    }
+}
+
+#[test]
+fn the_new_tab_is_named_after_the_session_title() {
+    let tools = AppTools {
+        ls: json!({"spaces":[{"id":"sp1","tabs":[
+            {"id":"tb1","terminals":[{"terminal":"t9"}]},
+            {"id":"tb2","terminals":[{"terminal":"t12"}]},
+        ]}]})
+        .to_string(),
+        did: RefCell::default(),
+    };
+    let opened = rs::open_terminal_in(
+        &tools,
+        Some("sp1".to_string()),
+        Path::new("/w"),
+        Path::new("/b/hw"),
+        "k",
+        Some("Fix  the\nlogin \u{1b}[2J bug"),
+    )
+    .unwrap();
+    assert_eq!(opened.terminal, "t12 started");
+    let did = tools.did.borrow();
+    assert_eq!(did.len(), 1);
+    assert_eq!(did[0][0], "tab.rename");
+    let arg: serde_json::Value = serde_json::from_str(&did[0][1]).unwrap();
+    assert_eq!(arg["id"], "tb2");
+    assert_eq!(arg["name"], "Fix the login [2J bug");
+}
+
+#[test]
+fn no_space_or_no_title_means_no_rename() {
+    let tools = AppTools {
+        ls: json!({"spaces":[]}).to_string(),
+        did: RefCell::default(),
+    };
+    rs::open_terminal_in(
+        &tools,
+        None,
+        Path::new("/w"),
+        Path::new("/b"),
+        "k",
+        Some("t"),
+    )
+    .unwrap();
+    rs::open_terminal_in(
+        &tools,
+        Some("sp1".into()),
+        Path::new("/w"),
+        Path::new("/b"),
+        "k",
+        None,
+    )
+    .unwrap();
+    assert!(tools.did.borrow().is_empty());
+    assert_eq!(rs::tab_name("   "), None);
+    assert_eq!(rs::tab_name(&"x".repeat(100)).unwrap().chars().count(), 60);
+}
+
+#[test]
 fn with_no_desktop_app_there_is_no_label_and_hc_still_runs() {
     let mut w = World::new();
     let tools = FakeTools::ok("");

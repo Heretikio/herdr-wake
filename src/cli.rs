@@ -163,10 +163,13 @@ enum Cmd {
         exists) and opens a new herdr-core terminal in the session's folder that resumes \
         it. The recorded flags are replayed, a permission bypass included, because you \
         asked; `restore_bypass = false` in config.toml still drops them. \
-        --print prints the command instead (`cd <folder> && <command>`). --fork resumes a \
+        --print prints the command instead (`cd <folder> && <command>`). --ticket checks and \
+        writes the launch ticket but opens nothing, printing JSON for a program that opens \
+        the terminal itself. --fork resumes a \
         Claude Code session as a copy, also one that is running.\n\n\
-        The terminal belongs to a Herdr space when one can be found; without one it shows \
-        in the phone app and `hc ls` but not in the desktop app.\n\n\
+        The terminal belongs to a Herdr space when one can be found; --space <SPACE-ID> \
+        names it (the desktop panel does), and wins over the guesses. Without a space it \
+        shows in the phone app and `hc ls` but not in the desktop app.\n\n\
         Reads herdr-core's socket to leave out running sessions and never starts herdr-core \
         itself. Run it as your own user, never as root."
     )]
@@ -191,9 +194,17 @@ enum Cmd {
         /// Bring back the session with this id (for an id that looks like a number)
         #[arg(long, value_name = "SESSION-ID", conflicts_with = "target")]
         id: Option<String>,
+        /// Herdr space id the new terminal joins (label herdr.space); the desktop panel passes it
+        #[arg(long, value_name = "SPACE-ID", value_parser = parse_space_id)]
+        space: Option<String>,
         /// Print the command that brings the session back instead of opening a terminal
-        #[arg(long)]
+        #[arg(long, conflicts_with = "ticket")]
         print: bool,
+        /// Check the session and write its launch ticket, but open nothing: prints JSON
+        /// {key, argv, cwd, title, space} for a program that opens the terminal itself (the
+        /// desktop panel). The ticket lapses after 10 minutes if nothing runs it
+        #[arg(long)]
+        ticket: bool,
         /// Resume a Claude Code session as a copy (--fork-session)
         #[arg(long)]
         fork: bool,
@@ -320,10 +331,14 @@ pub fn main() -> i32 {
             limit,
             json,
             id,
+            space,
             print,
+            ticket,
             fork,
             run: None,
         } => resurrect(ResurrectArgs {
+            ticket,
+            space,
             id,
             target,
             here,
@@ -957,7 +972,18 @@ fn resurrect_run(key: &str) -> anyhow::Result<i32> {
     }
 }
 
+/// `--space` value: a plain space id, so it is safe inside a label.
+fn parse_space_id(v: &str) -> Result<String, String> {
+    if crate::resurrect::valid_space_id(v) {
+        Ok(v.to_string())
+    } else {
+        Err("a space id is 1 to 64 letters, digits, '-' or '_'".to_string())
+    }
+}
+
 struct ResurrectArgs {
+    ticket: bool,
+    space: Option<String>,
     id: Option<String>,
     target: Option<String>,
     here: bool,
@@ -1001,6 +1027,7 @@ fn resurrect(a: ResurrectArgs) -> anyhow::Result<i32> {
         Some(t)
             if a.print
                 || a.fork
+                || a.ticket
                 || t.parse::<usize>().is_ok()
                 || rows.iter().any(|r| r.id() == t) =>
         {
@@ -1009,8 +1036,10 @@ fn resurrect(a: ResurrectArgs) -> anyhow::Result<i32> {
         _ => None,
     };
     let Some(target) = open_target else {
-        if a.print || a.fork {
-            bail!("--print and --fork need a number from the last listing or a session id");
+        if a.print || a.fork || a.ticket {
+            bail!(
+                "--print, --ticket and --fork need a number from the last listing or a session id"
+            );
         }
         filter.query = a.target.clone();
         let (shown, total) = rs::select(&rows, &filter, a.limit);
@@ -1050,7 +1079,7 @@ fn resurrect(a: ResurrectArgs) -> anyhow::Result<i32> {
         println!("{}", trust::printable(&command));
         return Ok(0);
     }
-    if !up {
+    if !up && !a.ticket {
         bail!(
             "herdr-core is not running, so there is no terminal to open (this command did not \
              start it). Start Herdr or herdr-core, or use --print for the command."
@@ -1084,7 +1113,27 @@ fn resurrect(a: ResurrectArgs) -> anyhow::Result<i32> {
         bail!("that session is running now; --fork resumes it as a copy");
     }
     let exe = std::env::current_exe().context("finding this herdr-wake binary")?;
-    let opened = rs::open_terminal(&tools, &mut core, &s.env, &s.home, &launch.cwd, &exe, &key)
+    if a.ticket {
+        // The caller opens the terminal (a tab it names itself) and runs the argv in it.
+        let out = serde_json::json!({
+            "key": key,
+            "argv": [exe, "resurrect", "--run", key],
+            "cwd": launch.cwd,
+            "title": row.title.as_deref().and_then(rs::tab_name),
+            "space": a.space,
+        });
+        println!("{out}");
+        return Ok(0);
+    }
+    let space = rs::choose_space(
+        a.space.as_deref(),
+        &tools,
+        &mut core,
+        &s.env,
+        &s.home,
+        &launch.cwd,
+    );
+    let opened = rs::open_terminal_in(&tools, space, &launch.cwd, &exe, &key, row.title.as_deref())
         .map_err(|e| anyhow!(e))?;
     let what = trust::printable(&format!(
         "{} session {}{}",
