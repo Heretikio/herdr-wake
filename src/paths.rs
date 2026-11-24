@@ -80,3 +80,21 @@ pub fn created_files_file(env: &BTreeMap<String, String>, home: &Path) -> PathBu
 pub fn last_boot_file(env: &BTreeMap<String, String>, home: &Path) -> PathBuf {
     state_dir(env, home).join("last-boot.json")
 }
+
+/// `<state dir>/history`: one journal file per session that herdr-wake
+/// recorded, kept after the session ends (see `history`).
+pub fn history_dir(env: &BTreeMap<String, String>, home: &Path) -> PathBuf {
+    state_dir(env, home).join("history")
+}
+
+/// `<state dir>/resurrect`: the launch tickets and the last listing of
+/// `herdr-wake resurrect`.
+pub fn resurrect_dir(env: &BTreeMap<String, String>, home: &Path) -> PathBuf {
+    state_dir(env, home).join("resurrect")
+}
+
+/// `<state dir>/transcripts.json`: the stat-keyed cache of what
+/// `herdr-wake resurrect` read from the agents' transcripts.
+pub fn transcript_cache_file(env: &BTreeMap<String, String>, home: &Path) -> PathBuf {
+    state_dir(env, home).join("transcripts.json")
+}

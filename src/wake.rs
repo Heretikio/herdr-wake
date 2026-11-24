@@ -25,6 +25,7 @@ use crate::agents::{self, Agent, Ctx, Plan};
 use crate::config::Config;
 use crate::core::{socket, Core, CoreError, TerminalId};
 use crate::gate;
+use crate::history::Ending;
 use crate::paths;
 use crate::platform::{ExitInfo, Platform};
 use crate::record::{self, AgentKind, Record, State};
@@ -637,6 +638,11 @@ fn wake_body(
         let failure = match &exit {
             Ok(x) => {
                 if killed(x) || platform.shutting_down() {
+                    if killed(x) && !platform.shutting_down() {
+                        if let Some(c) = cur.as_ref().filter(|c| is_ours(c, Some(x.pid))) {
+                            journal_end(platform, env, home, cfg, &tid, c, Ending::Killed);
+                        }
+                    }
                     return Some(folder);
                 }
                 if quit(x) {
@@ -648,6 +654,7 @@ fn wake_body(
                                 &tid,
                                 &c.session_id,
                             );
+                            journal_end(platform, env, home, cfg, &tid, &c, Ending::Quit);
                         }
                     }
                     return Some(folder);
@@ -701,6 +708,29 @@ fn wake_body(
             Decision::Resume(p) => p,
         };
     }
+}
+
+/// Journals the end of the session in `rec` (see `history::ended`).
+fn journal_end(
+    platform: &dyn Platform,
+    env: &BTreeMap<String, String>,
+    home: &Path,
+    cfg: &Config,
+    t: &TerminalId,
+    rec: &Record,
+    ending: Ending,
+) {
+    crate::history::journal(platform, env, home, cfg, |dir, limit, now| {
+        crate::history::ended(
+            dir,
+            limit,
+            rec.agent,
+            &rec.session_id,
+            Some((t, rec)),
+            ending,
+            now,
+        )
+    });
 }
 
 /// True when the label's record is the one herdr-wake itself stored for

@@ -839,6 +839,49 @@ fn resume_then_quit_ends_the_record_and_execs_the_shell_in_its_folder() {
     assert!(w.said.borrow().is_empty());
 }
 
+fn journal_of(w: &World, id: &str) -> Option<herdr_wake::history::Entry> {
+    herdr_wake::history::load(
+        &herdr_wake::paths::history_dir(&w.env, w.home.path()),
+        AgentKind::Claude,
+        id,
+    )
+}
+
+#[test]
+fn a_quit_is_journaled_as_quit_and_a_kill_as_killed() {
+    use herdr_wake::history::Ending;
+    let w = World::new();
+    let r = w.put_recovered();
+    w.platform
+        .push_run_result(Ok(ExitInfo::exited(900, 0, 60_000)));
+    w.run_stub();
+    let e = journal_of(&w, &r.session_id).expect("journal entry");
+    assert_eq!(e.ending, Ending::Quit);
+    assert_eq!(e.cwd, r.cwd);
+
+    let w = World::new();
+    let r = w.put_recovered();
+    w.platform
+        .push_run_result(Ok(ExitInfo::signaled(900, libc::SIGKILL, 100)));
+    w.run_stub();
+    assert_eq!(
+        journal_of(&w, &r.session_id).expect("entry").ending,
+        Ending::Killed
+    );
+    assert_eq!(w.stored().unwrap().state, State::Running);
+}
+
+#[test]
+fn a_death_during_shutdown_is_not_journaled() {
+    let w = World::new();
+    let r = w.put_recovered();
+    w.platform.set_shutting_down(true);
+    w.platform
+        .push_run_result(Ok(ExitInfo::signaled(900, libc::SIGTERM, 100)));
+    w.run_stub();
+    assert!(journal_of(&w, &r.session_id).is_none());
+}
+
 #[test]
 fn exit_130_is_a_quit_too() {
     let w = World::new();

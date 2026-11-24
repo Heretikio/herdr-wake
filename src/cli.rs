@@ -20,6 +20,7 @@ use clap::{Parser, Subcommand};
 use crate::agents::{self, Ctx};
 use crate::config::Config;
 use crate::core::{socket, Core, CoreError, Hello, Terminal, TerminalId};
+use crate::history::{self, Ending};
 use crate::hook::{self, HookOutcome, Start};
 use crate::platform::{self, Action, Platform, RUN_PREFIX};
 use crate::record::{self, AgentKind, ProcRef, State};
@@ -617,14 +618,45 @@ fn doctor(json: bool) -> anyhow::Result<i32> {
 fn forget(t: &TerminalId) -> anyhow::Result<i32> {
     let s = Session::new()?;
     let mut core = s.core();
+    let rec = stored_record(&mut core, t);
     let removed = record::forget(&mut core, t).map_err(|e| core_error(t, e))?;
     record::remove_copy(&paths::records_dir(&s.env, &s.home), t);
     if removed {
+        if let Some(rec) = rec {
+            journal_ending(&s, t, &rec);
+        }
         println!("{t}: record removed; its session will not be resumed");
     } else {
         println!("{t}: no record to remove");
     }
     Ok(0)
+}
+
+/// The terminal's record as it stands, read before `forget` or `off` removes
+/// it, so the history journal can say the session was forgotten.
+fn stored_record(core: &mut LiveCore, t: &TerminalId) -> Option<record::Record> {
+    core.get(t).ok().and_then(|term| record::of_terminal(&term))
+}
+
+/// Journals that the session in `rec` was forgotten.
+fn journal_ending(s: &Session, t: &TerminalId, rec: &record::Record) {
+    history::journal(
+        s.platform.as_ref(),
+        &s.env,
+        &s.home,
+        &s.cfg,
+        |dir, limit, now| {
+            history::ended(
+                dir,
+                limit,
+                rec.agent,
+                &rec.session_id,
+                Some((t, rec)),
+                Ending::Forgotten,
+                now,
+            )
+        },
+    );
 }
 
 /// `herdr-wake off <terminal>` and `herdr-wake on <terminal>`.
@@ -635,8 +667,12 @@ fn switch(t: &TerminalId, off: bool) -> anyhow::Result<i32> {
     let was_off = record::is_off(&term);
     record::set_off(&mut core, t, off).map_err(|e| core_error(t, e))?;
     if off {
+        let rec = stored_record(&mut core, t);
         let removed = record::forget(&mut core, t).map_err(|e| core_error(t, e))?;
         record::remove_copy(&paths::records_dir(&s.env, &s.home), t);
+        if let (true, Some(rec)) = (removed, rec) {
+            journal_ending(&s, t, &rec);
+        }
         let record = if removed {
             "its record was removed"
         } else {

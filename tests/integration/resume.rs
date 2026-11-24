@@ -557,10 +557,27 @@ fn off_forgets_and_stops_recording_and_resuming_until_on() {
     h.start();
     let t = h.terminal();
     h.launch(&t, "STUB_ID=claude-off-1 claude");
+    let journal = |id: &str| {
+        herdr_wake::history::load(
+            &h.home.join(".local/state/herdr-wake/history"),
+            herdr_wake::record::AgentKind::Claude,
+            id,
+        )
+    };
+    assert_eq!(
+        journal("claude-off-1").map(|e| e.ending),
+        Some(herdr_wake::history::Ending::Open),
+        "the start is journaled"
+    );
 
     let out = h.hw_ok(&["off", &t]);
     assert!(out.contains(&t), "{out}");
     assert_eq!(h.record(&t), None, "off forgets the record");
+    assert_eq!(
+        journal("claude-off-1").map(|e| e.ending),
+        Some(herdr_wake::history::Ending::Forgotten),
+        "off journals the session as forgotten"
+    );
     assert_eq!(
         h.get(&t).labels.get("wake.off").map(String::as_str),
         Some("1")

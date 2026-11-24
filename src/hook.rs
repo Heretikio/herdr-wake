@@ -15,6 +15,7 @@ use std::time::Duration;
 use crate::agents::{self, Agent, Ctx, Observation};
 use crate::config::Config;
 use crate::core::{socket, TerminalId};
+use crate::history::{self, Ending};
 use crate::platform::{self, Platform, ProcInfo};
 use crate::record::{self, AgentKind, ProcRef, Record, State};
 use crate::{gate, paths, trust, wake};
@@ -109,11 +110,25 @@ pub fn run_with(
         Observation::Ended {
             session_id,
             deliberate: Some(true),
-        } => ended(&session_id, ctx),
-        Observation::Ended { deliberate, .. } => HookOutcome::Ignored(match deliberate {
-            Some(_) => "killed, not quit".to_string(),
-            None => "end of unknown kind (left to the watcher)".to_string(),
-        }),
+        } => ended(agent.kind(), &session_id, ctx),
+        Observation::Ended {
+            session_id,
+            deliberate,
+        } => {
+            // The record stays as it is (the machine may be going down, or
+            // the watcher decides), but the journal learns the session is
+            // no longer open.
+            let ending = if deliberate.is_some() {
+                Ending::Killed
+            } else {
+                Ending::Unknown
+            };
+            journal_end(agent.kind(), &session_id, ending, ctx);
+            HookOutcome::Ignored(match deliberate {
+                Some(_) => "killed, not quit".to_string(),
+                None => "end of unknown kind (left to the watcher)".to_string(),
+            })
+        }
     }
 }
 
@@ -281,6 +296,7 @@ pub fn started(
         Ok(false) => return HookOutcome::Ignored("a newer record is stored".into()),
         Err(e) => return HookOutcome::Failed(format!("writing {terminal}: {e}")),
     }
+    journal_start(&terminal, &rec, prev.as_ref(), ctx);
     // The private copy that lets `herdr-wake shell` tell this record from
     // a label written by something else. Without it the record is never
     // resumed, so failing to write it is a failure of the hook.
@@ -356,7 +372,65 @@ fn resolve_bin(kind: AgentKind, p: Option<&ProcInfo>, path: Option<&String>) -> 
     }
 }
 
-fn ended(session_id: &str, ctx: &mut Ctx) -> HookOutcome {
+/// Journals the start of the session in `rec` on `terminal`, and the end
+/// of the session it replaced there (a new session id in a terminal whose
+/// record had not ended: Claude's `/clear`).
+fn journal_start(terminal: &TerminalId, rec: &Record, prev: Option<&Record>, ctx: &Ctx) {
+    history::journal(
+        ctx.platform,
+        ctx.env,
+        ctx.home,
+        ctx.cfg,
+        |dir, limit, now| {
+            if let Some(p) = prev.filter(|p| {
+                (p.agent, &p.session_id) != (rec.agent, &rec.session_id) && p.state != State::Ended
+            }) {
+                history::ended(
+                    dir,
+                    limit,
+                    p.agent,
+                    &p.session_id,
+                    Some((terminal, p)),
+                    Ending::Replaced,
+                    now,
+                )?;
+            }
+            history::started(dir, limit, terminal, rec, now)
+        },
+    );
+}
+
+/// Journals the end of `session_id` from the terminal named by the hook's
+/// environment, taking its facts from the stored record when the journal
+/// has no entry yet.
+fn journal_end(agent: AgentKind, session_id: &str, ending: Ending, ctx: &mut Ctx) {
+    let Ok(terminal) = env_terminal(ctx.env) else {
+        return;
+    };
+    let rec = record::load(ctx.core, &terminal)
+        .ok()
+        .flatten()
+        .filter(|r| r.agent == agent && r.session_id == session_id);
+    history::journal(
+        ctx.platform,
+        ctx.env,
+        ctx.home,
+        ctx.cfg,
+        |dir, limit, now| {
+            history::ended(
+                dir,
+                limit,
+                agent,
+                session_id,
+                rec.as_ref().map(|r| (&terminal, r)),
+                ending,
+                now,
+            )
+        },
+    );
+}
+
+fn ended(agent: AgentKind, session_id: &str, ctx: &mut Ctx) -> HookOutcome {
     if ctx.platform.shutting_down() {
         return HookOutcome::Ignored("shutting down".into());
     }
@@ -364,12 +438,34 @@ fn ended(session_id: &str, ctx: &mut Ctx) -> HookOutcome {
         Ok(t) => t,
         Err(out) => return out,
     };
+    // Read before the end is written: the journal may need the record.
+    let rec = record::load(ctx.core, &terminal)
+        .ok()
+        .flatten()
+        .filter(|r| r.agent == agent && r.session_id == session_id);
     match record::end(ctx.core, &terminal, session_id, None) {
         Ok(true) => {
             record::remove_copy_of(
                 &paths::records_dir(ctx.env, ctx.home),
                 &terminal,
                 session_id,
+            );
+            history::journal(
+                ctx.platform,
+                ctx.env,
+                ctx.home,
+                ctx.cfg,
+                |dir, limit, now| {
+                    history::ended(
+                        dir,
+                        limit,
+                        agent,
+                        session_id,
+                        rec.as_ref().map(|r| (&terminal, r)),
+                        Ending::Quit,
+                        now,
+                    )
+                },
             );
             HookOutcome::Ended
         }

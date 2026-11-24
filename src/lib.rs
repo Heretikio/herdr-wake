@@ -7,6 +7,7 @@ pub mod cli;
 pub mod config;
 pub mod core;
 pub mod gate;
+pub mod history;
 pub mod hook;
 pub mod paths;
 pub mod platform;

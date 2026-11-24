@@ -23,6 +23,9 @@ pub struct Config {
     pub first_alone_ms: u64,
     /// Folders (and everything under them) that never resume.
     pub exclude_dirs: Vec<PathBuf>,
+    /// How many sessions the history journal keeps (`herdr-wake resurrect`
+    /// lists them). The oldest are pruned first. 0 keeps no journal.
+    pub history_limit: usize,
     /// The program to resume an agent with instead of the one recorded, by
     /// agent name (`claude`, `codex`, `pi`, `opencode`). For agents started
     /// through a wrapper (a script that sets up the environment, then runs
@@ -59,6 +62,7 @@ impl Default for Config {
             stagger_ms: 1500,
             first_alone_ms: 8000,
             exclude_dirs: Vec::new(),
+            history_limit: 500,
             programs: BTreeMap::new(),
             real_shell: None,
         }

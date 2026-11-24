@@ -169,6 +169,21 @@ pub fn main(t: &TerminalId, agent: ProcRef, shell: ProcRef) -> i32 {
         if let Ok(Some(rec)) = connect().and_then(|mut c| record::load(c.as_mut(), t)) {
             if rec.state == State::Ended {
                 record::remove_copy_of(&crate::paths::records_dir(&env, &home), t, &rec.session_id);
+                // The history journal learns it too (best effort: a config
+                // that cannot be read keeps the default cap).
+                let cfg = crate::config::Config::load(&crate::paths::config_file(&env, &home))
+                    .unwrap_or_default();
+                crate::history::journal(platform.as_ref(), &env, &home, &cfg, |dir, limit, now| {
+                    crate::history::ended(
+                        dir,
+                        limit,
+                        rec.agent,
+                        &rec.session_id,
+                        Some((t, &rec)),
+                        crate::history::Ending::Quit,
+                        now,
+                    )
+                });
             }
         }
     }

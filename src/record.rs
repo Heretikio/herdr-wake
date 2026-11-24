@@ -369,7 +369,7 @@ pub fn forget(core: &mut dyn Core, t: &TerminalId) -> Result<bool, CoreError> {
 /// `id` as one plain file name: every byte outside `[A-Za-z0-9_-]` is
 /// written as `%XX`, so any id maps to one name inside a folder and two
 /// different ids never share it.
-fn plain_name(id: &str) -> String {
+pub(crate) fn plain_name(id: &str) -> String {
     let mut name = String::with_capacity(id.len() + 6);
     for b in id.bytes() {
         if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' {
