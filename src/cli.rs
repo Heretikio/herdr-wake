@@ -1063,6 +1063,26 @@ fn resurrect(a: ResurrectArgs) -> anyhow::Result<i32> {
             anyhow!(e).context("writing the launch ticket")
         }
     })?;
+    // Checked again now that this launch holds the pending mark: a run that
+    // started between `prepare` and here has its lock by now.
+    if !a.fork
+        && rs::run_is_live(
+            s.platform.as_ref(),
+            &s.env,
+            &s.home,
+            launch.entry.agent,
+            &launch.entry.session_id,
+        )
+    {
+        rs::abandon_ticket(
+            &s.env,
+            &s.home,
+            &key,
+            launch.entry.agent,
+            &launch.entry.session_id,
+        );
+        bail!("that session is running now; --fork resumes it as a copy");
+    }
     let exe = std::env::current_exe().context("finding this herdr-wake binary")?;
     let opened = rs::open_terminal(&tools, &mut core, &s.env, &s.home, &launch.cwd, &exe, &key)
         .map_err(|e| anyhow!(e))?;

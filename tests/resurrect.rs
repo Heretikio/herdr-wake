@@ -1988,6 +1988,17 @@ fn a_second_launch_back_to_back_is_refused_while_the_agent_has_not_registered() 
         // Even a second terminal that got its ticket anyway refuses.
         let second = launch_of_row(&mut w, rows.iter().find(|r| r.id() == A).unwrap());
         let key2 = rs::write_ticket(&w.f.env, &w.f.home, w.now + 1, &second, false).unwrap();
+        // The launching side checks the lock once it holds the pending mark,
+        // and gives the mark back when it backs off.
+        assert!(rs::run_is_live(
+            &slow,
+            &w.f.env,
+            &w.f.home,
+            second.entry.agent,
+            A
+        ));
+        rs::abandon_ticket(&w.f.env, &w.f.home, &key2, second.entry.agent, A);
+        let key2 = rs::write_ticket(&w.f.env, &w.f.home, w.now + 2, &second, false).unwrap();
         let said = RefCell::new(Vec::new());
         let mut core = w.f.core.clone();
         let mut env2 = env.clone();

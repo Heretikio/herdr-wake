@@ -1229,6 +1229,36 @@ fn run_lock_is_live(platform: &dyn Platform, lock: &RunLock) -> bool {
         .is_some_and(|p| lock.start == 0 || p.start == lock.start)
 }
 
+/// True when a live `--run` holds this session's run lock.
+///
+/// The launching side asks this after `write_ticket` has taken the pending
+/// mark: a `--run` makes its lock before it lets go of the pending mark, so
+/// a launch that got the mark and then finds no live lock is the only one.
+pub fn run_is_live(
+    platform: &dyn Platform,
+    env: &BTreeMap<String, String>,
+    home: &Path,
+    agent: AgentKind,
+    id: &str,
+) -> bool {
+    read_run_lock(&run_lock_file(env, home, agent, id))
+        .is_some_and(|l| run_lock_is_live(platform, &l))
+}
+
+/// Undoes `write_ticket` for `key`: removes its ticket and its pending mark.
+pub fn abandon_ticket(
+    env: &BTreeMap<String, String>,
+    home: &Path,
+    key: &str,
+    agent: AgentKind,
+    id: &str,
+) {
+    if valid_key(key) {
+        let _ = std::fs::remove_file(ticket_file(env, home, key));
+    }
+    release_pending(env, home, agent, id, key);
+}
+
 /// The run locks whose process is running.
 fn live_run_locks(
     platform: &dyn Platform,
