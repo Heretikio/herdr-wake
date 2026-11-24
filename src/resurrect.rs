@@ -114,7 +114,11 @@ impl Row {
 /// True when launching `agent` with `flags` would restore a permission
 /// bypass: the agent's own flag policy keeps something with `restore_bypass`
 /// on that it drops with it off.
-pub fn has_bypass(agent: AgentKind, flags: &[String]) -> bool {
+pub fn has_bypass(agent: AgentKind, flags: &[String], cfg: &Config) -> bool {
+    if !cfg.restore_bypass {
+        // Nothing of the kind is replayed, so nothing is marked.
+        return false;
+    }
     let mut argv = vec![agent.as_str().to_string()];
     argv.extend(flags.iter().cloned());
     let adapter = agents::get(agent);
@@ -223,32 +227,32 @@ pub fn open_sessions(ctx: &mut Ctx, claude_dirs: &BTreeSet<PathBuf>) -> OpenSet 
 
 // ------------------------------------------------------------------ rows
 
-/// The Claude config folder a journal entry's session used.
+/// The Claude config folder a journal entry's session used, found the way
+/// `resume_plan` finds it.
 fn entry_claude_dir(e: &Entry, home: &Path) -> PathBuf {
-    match e.env.get("CLAUDE_CONFIG_DIR") {
-        Some(d) if !d.is_empty() => e.cwd.join(d),
-        _ => home.join(".claude"),
-    }
+    agents::claude::config_dir_in(&e.env, home, &e.cwd)
 }
 
-/// The Codex home folder a journal entry's session used (as `resume_plan`
-/// reads it: relative to the session's folder).
-fn entry_codex_dir(e: &Entry, home: &Path) -> PathBuf {
-    match e.env.get("CODEX_HOME") {
-        Some(d) if !d.is_empty() => e.cwd.join(d),
-        _ => home.join(".codex"),
-    }
+/// The Codex home folder a journal entry's session used, found the way
+/// `resume_plan` finds it (the caller's `env` stands in when the entry has
+/// none).
+fn entry_codex_dir(e: &Entry, env: &BTreeMap<String, String>, home: &Path) -> PathBuf {
+    agents::codex::home_in(&e.env, env, home, &e.cwd)
 }
 
 /// Where a journal entry's session file is, and whether it is there.
-fn entry_transcript(e: &Entry, home: &Path) -> (Option<PathBuf>, Transcript) {
+fn entry_transcript(
+    e: &Entry,
+    env: &BTreeMap<String, String>,
+    home: &Path,
+) -> (Option<PathBuf>, Transcript) {
     let recorded = e.session_file.clone().filter(|f| f.is_file());
     let found = match e.agent {
         AgentKind::Claude => recorded.or_else(|| {
             transcripts::claude_transcript(&entry_claude_dir(e, home), &e.cwd, &e.session_id)
         }),
         AgentKind::Codex => recorded.or_else(|| {
-            crate::agents::codex::find_rollout(&entry_codex_dir(e, home), &e.session_id)
+            crate::agents::codex::find_rollout(&entry_codex_dir(e, env, home), &e.session_id)
         }),
         AgentKind::Pi => recorded,
         AgentKind::OpenCode => return (None, Transcript::Unknown),
@@ -275,7 +279,7 @@ pub fn collect(ctx: &mut Ctx) -> Vec<Row> {
 
     for e in journal {
         seen.insert((e.agent, e.session_id.clone()));
-        let (path, transcript) = entry_transcript(&e, ctx.home);
+        let (path, transcript) = entry_transcript(&e, ctx.env, ctx.home);
         let found = path
             .as_deref()
             .and_then(|p| transcripts::meta_of(e.agent, p, &mut cache));
@@ -284,7 +288,7 @@ pub fn collect(ctx: &mut Ctx) -> Vec<Row> {
             .and_then(|f| f.meta.title())
             .map(str::to_string);
         if e.agent == AgentKind::Codex {
-            let dir = entry_codex_dir(&e, ctx.home);
+            let dir = entry_codex_dir(&e, ctx.env, ctx.home);
             let names = names_by_dir
                 .entry(dir.clone())
                 .or_insert_with(|| transcripts::codex_names(&dir));
@@ -295,13 +299,13 @@ pub fn collect(ctx: &mut Ctx) -> Vec<Row> {
                 claude_dirs.insert(entry_claude_dir(&e, ctx.home));
             }
             AgentKind::Codex => {
-                codex_dirs.insert(entry_codex_dir(&e, ctx.home));
+                codex_dirs.insert(entry_codex_dir(&e, ctx.env, ctx.home));
             }
             _ => {}
         }
         rows.push(Row {
             last_ms: e.last_ms().max(found.map_or(0, |f| f.mtime_ms)),
-            bypass: has_bypass(e.agent, &e.flags),
+            bypass: has_bypass(e.agent, &e.flags, ctx.cfg),
             entry: e,
             title,
             source: Source::Wake,
@@ -330,7 +334,7 @@ pub fn collect(ctx: &mut Ctx) -> Vec<Row> {
                     dir.to_string_lossy().into_owned(),
                 );
             }
-            rows.push(transcript_row(&f, cwd, flags, env));
+            rows.push(transcript_row(&f, cwd, flags, env, ctx.cfg));
         }
     }
     for dir in &codex_dirs {
@@ -346,7 +350,7 @@ pub fn collect(ctx: &mut Ctx) -> Vec<Row> {
             if *dir != default_codex {
                 env.insert("CODEX_HOME".to_string(), dir.to_string_lossy().into_owned());
             }
-            rows.push(transcript_row(&f, cwd, Vec::new(), env));
+            rows.push(transcript_row(&f, cwd, Vec::new(), env, ctx.cfg));
         }
     }
     let _ = cache.save(&paths::transcript_cache_file(ctx.env, ctx.home));
@@ -368,10 +372,11 @@ fn transcript_row(
     cwd: PathBuf,
     flags: Vec<String>,
     env: BTreeMap<String, String>,
+    cfg: &Config,
 ) -> Row {
     let agent = f.meta.agent;
     Row {
-        bypass: has_bypass(agent, &flags),
+        bypass: has_bypass(agent, &flags, cfg),
         entry: Entry {
             v: history::VERSION,
             agent,
@@ -704,6 +709,13 @@ pub fn resolve<'a>(
                 )
             });
     }
+    resolve_id(rows, target, filter)
+}
+
+/// The row of the session whose id is `id` (`--id` names an id that is all
+/// digits, which `resolve` would read as a number).
+pub fn resolve_id<'a>(rows: &'a [Row], id: &str, filter: &Filter) -> Result<&'a Row, String> {
+    let target = id;
     let matches: Vec<&Row> = rows
         .iter()
         .filter(|r| r.id() == target && filter.agent.is_none_or(|a| a == r.agent()))
@@ -774,8 +786,12 @@ pub fn prepare(row: &Row, ctx: &mut Ctx, fork: bool) -> Result<Launch, String> {
     if !trust::valid_session_id(row.id()) {
         return Err("the session id is not valid".to_string());
     }
-    if row.open {
-        return Err("that session is running now; it cannot be brought back twice".to_string());
+    if row.open && !(fork && agent_kind == AgentKind::Claude) {
+        return Err(if agent_kind == AgentKind::Claude {
+            "that session is running now; --fork resumes it as a copy".to_string()
+        } else {
+            "that session is running now; it cannot be brought back twice".to_string()
+        });
     }
     let mut entry = row.entry.clone();
     if row.source == Source::Transcript {

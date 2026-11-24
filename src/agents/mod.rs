@@ -134,6 +134,15 @@ pub trait Agent {
     }
 }
 
+/// `value`, a folder named in an agent's environment (`CLAUDE_CONFIG_DIR`,
+/// `CODEX_HOME`), as the agent sees it: an absolute path as it is, a
+/// relative one under `cwd`, the folder the agent runs in. One rule for
+/// every place that looks into such a folder (the resume checks and
+/// `resurrect`).
+pub(crate) fn dir_in(cwd: &Path, value: &str) -> PathBuf {
+    cwd.join(value)
+}
+
 /// The first executable file called `name` in the absolute folders of the
 /// `PATH` in `env`.
 pub fn on_path(name: &str, env: &BTreeMap<String, String>) -> Option<PathBuf> {

@@ -186,6 +186,9 @@ enum Cmd {
         /// Print the listing as JSON
         #[arg(long)]
         json: bool,
+        /// Bring back the session with this id (for an id that looks like a number)
+        #[arg(long, value_name = "SESSION-ID", conflicts_with = "target")]
+        id: Option<String>,
         /// Print the command that brings the session back instead of opening a terminal
         #[arg(long)]
         print: bool,
@@ -314,10 +317,12 @@ pub fn main() -> i32 {
             agent,
             limit,
             json,
+            id,
             print,
             fork,
             run: None,
         } => resurrect(ResurrectArgs {
+            id,
             target,
             here,
             folder,
@@ -950,6 +955,7 @@ fn resurrect_run(key: &str) -> anyhow::Result<i32> {
 }
 
 struct ResurrectArgs {
+    id: Option<String>,
     target: Option<String>,
     here: bool,
     folder: Option<PathBuf>,
@@ -987,6 +993,7 @@ fn resurrect(a: ResurrectArgs) -> anyhow::Result<i32> {
     let now = s.platform.now_ms();
 
     let open_target = match a.target.as_deref() {
+        _ if a.id.is_some() => a.id.as_deref(),
         Some(t)
             if a.print
                 || a.fork
@@ -1023,7 +1030,12 @@ fn resurrect(a: ResurrectArgs) -> anyhow::Result<i32> {
         return Ok(0);
     };
 
-    let row = rs::resolve(&rows, target, &filter, &s.env, &s.home).map_err(|e| anyhow!(e))?;
+    let row = if a.id.is_some() {
+        rs::resolve_id(&rows, target, &filter)
+    } else {
+        rs::resolve(&rows, target, &filter, &s.env, &s.home)
+    }
+    .map_err(|e| anyhow!(e))?;
     let launch = rs::prepare(row, &mut s.ctx(&mut core), a.fork).map_err(|e| anyhow!(e))?;
     let command = launch.command(&s.env);
     if a.print {

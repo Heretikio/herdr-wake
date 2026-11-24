@@ -77,7 +77,7 @@ impl Agent for Claude {
         if !rec.cwd.is_dir() {
             return Plan::Permanent("folder missing".into());
         }
-        let config = config_dir(&rec.env, ctx.home);
+        let config = config_dir_in(&rec.env, ctx.home, &rec.cwd);
         if !transcript_exists(&config, &rec.cwd, &rec.session_id) {
             return Plan::Permanent("session not found".into());
         }
@@ -249,6 +249,16 @@ pub(crate) fn looks_like_claude(p: &ProcInfo) -> bool {
 pub(crate) fn config_dir(env: &BTreeMap<String, String>, home: &Path) -> PathBuf {
     match env.get("CLAUDE_CONFIG_DIR") {
         Some(d) if !d.is_empty() => PathBuf::from(d),
+        _ => home.join(".claude"),
+    }
+}
+
+/// Claude's config folder for a session that runs in `cwd`: `CLAUDE_CONFIG_DIR`
+/// from `env` (a relative one is under `cwd`, see `agents::dir_in`), else
+/// `<home>/.claude`.
+pub(crate) fn config_dir_in(env: &BTreeMap<String, String>, home: &Path, cwd: &Path) -> PathBuf {
+    match env.get("CLAUDE_CONFIG_DIR") {
+        Some(d) if !d.is_empty() => super::dir_in(cwd, d),
         _ => home.join(".claude"),
     }
 }

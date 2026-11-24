@@ -264,23 +264,58 @@ fn claude_transcript_modes_become_flags() {
 
 #[test]
 fn the_bypass_marker_follows_the_agents_own_flag_policy() {
+    use herdr_wake::config::Config;
     use herdr_wake::resurrect::has_bypass;
+    let cfg = Config::default();
     let f = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     assert!(has_bypass(
         AgentKind::Claude,
-        &f(&["--dangerously-skip-permissions"])
+        &f(&["--dangerously-skip-permissions"]),
+        &cfg
     ));
     assert!(has_bypass(
         AgentKind::Claude,
-        &f(&["--permission-mode", "auto"])
+        &f(&["--permission-mode", "auto"]),
+        &cfg
     ));
     assert!(!has_bypass(
         AgentKind::Claude,
-        &f(&["--permission-mode", "plan"])
+        &f(&["--permission-mode", "plan"]),
+        &cfg
     ));
-    assert!(!has_bypass(AgentKind::Claude, &f(&["--model", "opus"])));
-    assert!(has_bypass(AgentKind::Codex, &f(&["--yolo"])));
-    assert!(!has_bypass(AgentKind::Codex, &f(&["--model", "gpt"])));
+    assert!(!has_bypass(
+        AgentKind::Claude,
+        &f(&["--model", "opus"]),
+        &cfg
+    ));
+    assert!(has_bypass(AgentKind::Codex, &f(&["--yolo"]), &cfg));
+    assert!(!has_bypass(AgentKind::Codex, &f(&["--model", "gpt"]), &cfg));
+    // With restore_bypass off nothing is replayed, so nothing is marked.
+    let off = Config {
+        restore_bypass: false,
+        ..Config::default()
+    };
+    assert!(!has_bypass(
+        AgentKind::Claude,
+        &f(&["--dangerously-skip-permissions"]),
+        &off
+    ));
+    assert!(!has_bypass(AgentKind::Codex, &f(&["--yolo"]), &off));
+}
+
+#[test]
+fn the_bypass_marker_in_a_listing_goes_with_restore_bypass_false() {
+    let mut w = World::new();
+    w.journal(
+        AgentKind::Claude,
+        A,
+        &["--dangerously-skip-permissions"],
+        HOUR,
+        Ending::Quit,
+    );
+    assert!(row(&w.rows(), A).bypass);
+    w.f.cfg.restore_bypass = false;
+    assert!(!row(&w.rows(), A).bypass);
 }
 
 // ------------------------------------------------------- open sessions
@@ -764,6 +799,65 @@ fn the_same_checks_as_a_wake_refuse_what_is_not_safe() {
     r.open = true;
     let err = rs::prepare(&r, &mut w.f.ctx(), false).unwrap_err();
     assert!(err.contains("running now"), "{err}");
+}
+
+#[test]
+fn an_open_claude_session_can_be_forked_but_not_resumed_twice() {
+    let mut w = World::new();
+    let mut r = ready(&mut w, &[]);
+    r.open = true;
+    let err = rs::prepare(&r, &mut w.f.ctx(), false).unwrap_err();
+    assert!(err.contains("--fork"), "{err}");
+    let l = rs::prepare(&r, &mut w.f.ctx(), true).unwrap();
+    assert_eq!(l.argv.last().map(String::as_str), Some("--fork-session"));
+
+    // Not for the others: forking is Claude's.
+    w.journal(AgentKind::Codex, D, &[], HOUR, Ending::Quit);
+    let mut codex = row(&w.rows(), D).clone();
+    codex.open = true;
+    assert!(rs::prepare(&codex, &mut w.f.ctx(), true).is_err());
+    assert!(rs::prepare(&codex, &mut w.f.ctx(), false).is_err());
+}
+
+#[test]
+fn an_id_that_looks_like_a_number_is_found_by_resolve_id() {
+    let mut w = World::new();
+    w.journal(AgentKind::Claude, "424242", &[], HOUR, Ending::Quit);
+    let rows = w.rows();
+    let f = Filter::default();
+    assert_eq!(rs::resolve_id(&rows, "424242", &f).unwrap().id(), "424242");
+    // `resolve` reads it as a row number, which the listing does not have.
+    assert!(rs::resolve(&rows, "424242", &f, &w.f.env, &w.f.home).is_err());
+    assert!(rs::resolve_id(&rows, "nope", &f).is_err());
+}
+
+#[test]
+fn a_relative_config_folder_is_found_under_the_sessions_folder_like_a_resume_does() {
+    let mut w = World::new();
+    let cwd = w.cwd();
+    w.journal(AgentKind::Claude, A, &[], HOUR, Ending::Quit);
+    // The session ran with CLAUDE_CONFIG_DIR=cc (relative to its folder).
+    let mut entry = history::load(&w.history(), AgentKind::Claude, A).unwrap();
+    entry.env.insert("CLAUDE_CONFIG_DIR".into(), "cc".into());
+    std::fs::write(
+        history::file(&w.history(), AgentKind::Claude, A),
+        serde_json::to_vec(&entry).unwrap(),
+    )
+    .unwrap();
+    let moved = cwd
+        .join("cc/projects")
+        .join(herdr_wake::agents::claude::project_dir_name(&cwd));
+    write_lines(
+        &moved.join(format!("{A}.jsonl")),
+        &[user(&cwd, "relative config")],
+    );
+
+    let rows = w.rows();
+    let r = row(&rows, A);
+    assert_eq!(r.transcript, Transcript::Present);
+    assert_eq!(r.title.as_deref(), Some("relative config"));
+    // And the resume check agrees.
+    assert!(rs::prepare(r, &mut w.f.ctx(), false).is_ok());
 }
 
 #[test]

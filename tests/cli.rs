@@ -249,6 +249,9 @@ fn resurrect_refuses_what_makes_no_sense() {
     assert!(err(&["no-such-session-id", "--print"]).contains("no session with the id"));
     let out = resurrect(h, &["--here", "--folder", "/x"]);
     assert_eq!(out.status.code(), Some(2));
+    let out = resurrect(h, &["--id", "123", "something"]);
+    assert_eq!(out.status.code(), Some(2), "--id and a target do not mix");
+    assert!(err(&["--id", "123", "--print"]).contains("no session with the id"));
 }
 
 #[test]

@@ -86,6 +86,22 @@ pub fn codex_home(env: &BTreeMap<String, String>, home: &Path) -> PathBuf {
     }
 }
 
+/// Codex's home folder for a session that runs in `cwd`: `CODEX_HOME` from
+/// the session's own environment `own` (a relative one is under `cwd`, see
+/// `agents::dir_in`), else the one of the caller's environment `env`, else
+/// `<home>/.codex`.
+pub(crate) fn home_in(
+    own: &BTreeMap<String, String>,
+    env: &BTreeMap<String, String>,
+    home: &Path,
+    cwd: &Path,
+) -> PathBuf {
+    match own.get("CODEX_HOME") {
+        Some(v) if !v.is_empty() => super::dir_in(cwd, v),
+        _ => codex_home(env, home),
+    }
+}
+
 /// The rollout file of session `id` under `<codex_home>/sessions`, plain
 /// (`.jsonl`) preferred over compressed (`.jsonl.zst`), or `None`.
 pub fn find_rollout(codex_home: &Path, id: &str) -> Option<PathBuf> {
@@ -584,10 +600,7 @@ fn resume_plan(codex: &Codex, rec: &Record, ctx: &mut Ctx) -> Plan {
         if !rec.cwd.is_dir() {
             return Plan::Permanent("folder missing".into());
         }
-        let home = match rec.env.get("CODEX_HOME") {
-            Some(v) if !v.is_empty() => rec.cwd.join(v),
-            _ => codex_home(ctx.env, ctx.home),
-        };
+        let home = home_in(&rec.env, ctx.env, ctx.home, &rec.cwd);
         if find_rollout(&home, &rec.session_id).is_none() {
             return Plan::Permanent("session not found".into());
         }
