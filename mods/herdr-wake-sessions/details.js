@@ -52,6 +52,7 @@ export function sessionDetail(s, st, t, { back, resume, fork, copy }) {
         .child(v_flex().gap(6).pt(12).border_t(1).border_color(t.border).text_size(12)
           .child(fact('Status', h_flex().gap(6).items_center()
             .child(div().flex_none().text_color(stateColor(state.key, t)).child('●')).child(state.label)))
+          .child(fact('Machine', s.machine ?? 'This computer'))
           .child(fact('Agent', harnessName(s)))
           .child(fact('Folder', h_flex().gap(6).flex_wrap().child(folder(s.cwd))
             .when(!s.exists, el => el.child(div().text_color(t.ansi1).child('missing')))))

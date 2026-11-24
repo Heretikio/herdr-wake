@@ -11,12 +11,14 @@ export const validSpaceId = id => typeof id === 'string' && /^[A-Za-z0-9_-]{1,64
 
 // One row of `herdr-wake resurrect --json`, as the panel uses it. Fields herdr-wake may not have
 // yet (branch, cost, summary and so on) stay undefined, and the panel leaves those facts out.
-export function normalizeRow(j) {
+export function normalizeRow(j, machine = null) {
   const num = v => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
   const str = v => (typeof v === 'string' && v ? v : undefined);
   const flags = Array.isArray(j.flags) ? j.flags.filter(f => typeof f === 'string') : [];
   return {
     id: j.session_id,
+    // The Herdr machine the session is on (`hc machine ls`); null is this computer.
+    machine: machine || null,
     program: j.agent && j.agent !== 'claude' ? j.agent : undefined,
     title: str(j.title) ?? '',
     cwd: typeof j.cwd === 'string' ? j.cwd : null,
@@ -103,10 +105,15 @@ export function spacePlaces(allSpaces, allPanes, places) {
 }
 // A session's place as the sidebar names it: "repo > space" when a space is there and isn't named
 // after the repo; otherwise the worktree git or the path gave.
-export function labelPlace(place, names) {
+// `machine`: a row from another machine carries its name, which the place line shows first.
+export function labelPlace(place, names, machine = null) {
   const name = names.get(placeKey(place)), worktree = Boolean(place.tree);
-  return name && name !== place.repo ? { repo: place.repo, tree: name, worktree } : { ...place, worktree };
+  const label = name && name !== place.repo ? { repo: place.repo, tree: name, worktree } : { ...place, worktree };
+  return machine ? { ...label, machine } : label;
 }
+// The place line as text (the copy menu's title, the tests): "laptop · ~ › repo", the machine only
+// for a row that is not from this computer.
+export const placeText = ({ machine, repo, tree }) => `${machine ? machine + ' · ' : ''}${repo}${tree ? ` › ${tree}` : ''}`;
 
 // Whether `folder` is `root` or inside it.
 function inside(folder, root) {
@@ -125,15 +132,21 @@ function inRepo(cwd, repo, repos) {
   const place = placeFromPath(f, '');
   return Boolean(place.tree) && place.repo === base(r).replace(/\.git$/, '');
 }
-// The sessions in scope `where` whose text has the query. `where`: { folder } is exactly that folder
-// (This folder); { repo } every folder of that repository, its worktrees included; { under } that
-// folder and everything in it (This space, see spaceScope); null everything (All spaces).
-export function filterSessions(rows, query, where, repos = {}) {
+// Whether a row is on the machine the picker chose: ALL_MACHINES, THIS_COMPUTER or a machine name.
+export const machineMatches = (s, pick = ALL_MACHINES) => pick === ALL_MACHINES || (s.machine ?? '') === pick;
+// The sessions in scope `where` whose text has the query, on the machine `pick` chose. `where`:
+// { folder } is exactly that folder (This folder); { repo } every folder of that repository, its
+// worktrees included; { under } that folder and everything in it (This space, see spaceScope); null
+// everything (All spaces). `where.machine` (a name, or null for this computer) limits it to the
+// machine of the focused space; the folders are that machine's. The query also matches the machine name.
+export function filterSessions(rows, query, where, repos = {}, pick = ALL_MACHINES) {
   const q = query.trim().toLowerCase();
-  const inScope = s => !where || (where.repo !== undefined ? inRepo(s.cwd, where.repo, repos)
+  const inScope = s => !where || (where.machine !== undefined && (s.machine ?? null) !== where.machine ? false
+    : where.repo !== undefined ? inRepo(s.cwd, where.repo, repos)
     : where.under !== undefined ? inside(s.cwd, where.under)
     : Boolean(normalizeFolder(where.folder)) && normalizeFolder(s.cwd) === normalizeFolder(where.folder));
-  return rows.filter(s => inScope(s) && `${s.title} ${s.cwd || ''} ${s.branch || ''} ${s.id} ${harnessName(s)}`.toLowerCase().includes(q));
+  return rows.filter(s => machineMatches(s, pick) && inScope(s)
+    && `${s.title} ${s.cwd || ''} ${s.branch || ''} ${s.id} ${harnessName(s)} ${s.machine || ''}`.toLowerCase().includes(q));
 }
 
 // A word for a shell command: quoted only when it has to be.
@@ -145,6 +158,151 @@ export const COPIES = [
   { key: 'folder', label: 'Copy folder', icon: 'folder' },
 ];
 export const copyValues = (s, resumeCommand) => ({ session: s.id ?? null, resume: resumeCommand || null, folder: s.cwd || null });
+
+// ---- Machines: this computer and the others `hc machine ls` lists ----
+
+// The picker's values: every machine, this computer, or a machine's name (a valid name is never
+// empty or "*").
+export const ALL_MACHINES = '*';
+export const THIS_COMPUTER = '';
+// A machine name as the panel passes it to `hc exec --on`: letters, digits, - _ and ., starting with
+// a letter or digit (so it is never read as an option), at most 64 characters.
+export const validMachine = name => typeof name === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name);
+// `hc machine ls --json` as [{ name, connected }]: no temporary machines, no invalid or repeated names.
+export function parseMachines(stdout) {
+  let list;
+  try { list = JSON.parse(stdout)?.machines; } catch (_e) { return []; }
+  if (!Array.isArray(list)) return [];
+  const seen = new Set(), out = [];
+  for (const m of list) {
+    if (!m || m.temporary === true || !validMachine(m.name) || seen.has(m.name)) continue;
+    seen.add(m.name);
+    out.push({ name: m.name, connected: m.state === 'connected' });
+  }
+  return out;
+}
+// The space id `herdr-wake resurrect --space` takes on that machine: Herdr shows another machine's
+// space ids as "<machine>/<id>", and the labels on that machine have no prefix.
+export const localSpaceId = (id, machine) => machine && typeof id === 'string' && id.startsWith(machine + '/') ? id.slice(machine.length + 1) : id;
+// The space a session opens in: the focused one when it is on the session's machine, else the first
+// space there; null when that machine has none (a remote one is then created). `machine`: null here.
+export function resumeSpace(machine, focusedSpace, allSpaces) {
+  const on = sp => (sp.machine ?? null) === (machine ?? null);
+  if (focusedSpace && on(focusedSpace)) return focusedSpace;
+  return allSpaces.find(on) ?? null;
+}
+// A sh script that runs the remote herdr-wake: ~/.local/bin first (the remote core's PATH may not
+// have it), then PATH. It is fixed text; everything that varies is an argument ("$@"), never part of
+// the script, and `hc exec` runs the argv with no shell around it.
+export const WAKE_SCRIPT = 'b="$HOME/.local/bin/herdr-wake"; [ -x "$b" ] || b=$(command -v herdr-wake) '
+  + '|| { echo "herdr-wake: not installed" >&2; exit 127; }; exec "$b" "$@"';
+// The `hc` arguments that run `herdr-wake <wakeArgs>` on `machine`, ended after `seconds`.
+export function remoteArgs(machine, wakeArgs, seconds = 60) {
+  if (!validMachine(machine)) throw new Error('invalid machine name');
+  if (!Array.isArray(wakeArgs) || !wakeArgs.every(a => typeof a === 'string')) throw new Error('invalid arguments');
+  const secs = Math.min(600, Math.max(1, Math.ceil(Number(seconds) || 60)));
+  return ['exec', '--on', machine, '--timeout', String(secs), '--', 'sh', '-c', WAKE_SCRIPT, 'herdr-wake', ...wakeArgs];
+}
+// What `hc` itself reports (a machine it cannot reach, a program it cannot start) is JSON on stderr:
+// {"error":{"kind":...,"message":...}}. null when stderr is something else (the program's own).
+export function hcError(stderr) {
+  const line = String(stderr ?? '').trim().split('\n').filter(Boolean).pop() ?? '';
+  try {
+    const e = JSON.parse(line)?.error;
+    return e && typeof e === 'object' && typeof e.kind === 'string' ? e : null;
+  } catch (_e) { return null; }
+}
+// What one remote `herdr-wake resurrect --json` call came to: { state: 'ok', sessions } or a state
+// that says why there are none: missing (no herdr-wake), old (no `resurrect`), slow, offline,
+// unreachable, error ({ text }).
+export function classifyRemote(r) {
+  const err = hcError(r.stderr);
+  if (err) {
+    if (err.kind === 'spawn_failed') return { state: 'missing' };
+    if (/timeout|timed_out/.test(err.kind)) return { state: 'slow' };
+    if (/offline|disconnected/.test(err.kind)) return { state: 'offline' };
+    return { state: 'unreachable' };
+  }
+  if (r.code === 127) return { state: 'missing' };
+  if (r.code === 124) return { state: 'slow' };
+  if (r.code === 2 && /unrecognized subcommand|unexpected argument|unrecognized/i.test(r.stderr ?? '')) return { state: 'old' };
+  if (r.code !== 0) return { state: 'error', text: cleanError(r.stderr) };
+  try {
+    const list = JSON.parse(r.stdout)?.sessions;
+    if (Array.isArray(list)) return { state: 'ok', sessions: list };
+  } catch (_e) { /* not JSON */ }
+  return { state: 'error', text: 'herdr-wake gave no session list' };
+}
+// A remote call's result as the callers that talk to herdr-wake read it ({ code, stdout, stderr }):
+// what `hc` itself reported becomes a plain sentence on stderr. A program that is not there gives 127.
+export function remoteResult(machine, r) {
+  const err = hcError(r.stderr);
+  if (!err) return { code: r.code, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+  const text = err.kind === 'spawn_failed' ? `herdr-wake is not installed on ${machine}`
+    : /timeout|timed_out/.test(err.kind) ? `${machine} did not answer in time` : `${machine} is not reachable`;
+  return { code: err.kind === 'spawn_failed' ? 127 : 1, stdout: '', stderr: text };
+}
+const NOTES = { missing: 'herdr-wake with resurrect not installed', old: 'herdr-wake with resurrect not installed',
+  slow: 'no answer in 15 s', offline: 'offline', unreachable: 'not reachable' };
+// The quiet footer text for a machine that gave no list, or null (it answered).
+export const machineNote = c => c.state === 'ok' ? null : (c.state === 'error' ? c.text : NOTES[c.state]) ?? null;
+// Footer lines: machines with the same note share one ("box1, laptop: herdr-wake with resurrect not
+// installed"), in the order the machines came.
+export function noteLines(notes) {
+  const groups = new Map();
+  for (const { machine, text } of notes) if (text) groups.set(text, [...(groups.get(text) ?? []), machine]);
+  return [...groups].map(([text, names]) => `${names.join(', ')}: ${text}`);
+}
+// A promise that gives up after `ms`: resolves with `onTimeout` instead. `after(ms, callback)` sets the
+// timer (the Herdr shell has no setTimeout: the panel passes cx.timer.after; node's is the default). A
+// timer that is no longer needed fires and changes nothing.
+export function withTimeout(promise, ms, onTimeout, after = (n, f) => setTimeout(f, n)) {
+  return Promise.race([promise, new Promise(resolve => { after(ms, () => resolve(onTimeout)); })]);
+}
+// One machine's sessions through `runHc(args)` (the `hc` call), within `ms` and never rejecting:
+// { state, rows } with the rows as normalizeRow reads them, tagged with the machine.
+export async function loadMachine(machine, runHc, ms = 15000, after = undefined) {
+  let r;
+  try {
+    const args = remoteArgs(machine, ['resurrect', '--json', '--limit', '0'], Math.ceil(ms / 1000) + 5);
+    r = await withTimeout(runHc(args), ms, { code: 124, stdout: '', stderr: '' }, after);
+  } catch (e) { r = { code: 1, stdout: '', stderr: JSON.stringify({ error: { kind: 'unreachable', message: String(e?.message ?? e) } }) }; }
+  const c = classifyRemote(r);
+  if (c.state !== 'ok') return c;
+  const rows = c.sessions.map(j => normalizeRow(j, machine)).filter(s => typeof s.id === 'string');
+  return { state: 'ok', rows };
+}
+// The rows of every machine in one list, newest first. `byMachine`: Map of machine (null: this
+// computer) to its rows.
+export function mergeRows(byMachine) {
+  const all = [];
+  for (const rows of byMachine.values()) all.push(...rows);
+  return all.sort((a, b) => b.activity - a.activity);
+}
+// A row's key in the list and in the launched set: the id, with the machine when it is not here (the
+// same id can be on two machines).
+export const rowKey = s => s.machine ? `${s.machine}/${s.id}` : s.id;
+// The picker's choices: all, this computer, and each machine that answered.
+export function machineOptions(answered) {
+  return [{ key: ALL_MACHINES, label: 'All machines' }, { key: THIS_COMPUTER, label: 'This computer' },
+    ...[...answered].sort().map(name => ({ key: name, label: name }))];
+}
+// The picked machine if it is still a choice, else all.
+export const effectivePick = (pick, answered) =>
+  pick === THIS_COMPUTER || (typeof pick === 'string' && answered.includes(pick)) ? pick : ALL_MACHINES;
+// The home folder of a machine, guessed from where its sessions ran (/Users/x, /home/x, /root), so a
+// session at home reads "~". '' when nothing says.
+export function guessHome(cwds) {
+  const count = new Map();
+  for (const c of cwds) {
+    const m = typeof c === 'string' ? /^(\/Users\/[^/]+|\/home\/[^/]+|\/root)(?=\/|$)/.exec(c) : null;
+    if (m) count.set(m[1], (count.get(m[1]) ?? 0) + 1);
+  }
+  return [...count].sort((a, b) => b[1] - a[1])[0]?.[0] ?? '';
+}
+// How many of a machine's newest sessions get a background summary: all 20 here, 5 on a machine
+// that is not (each one costs that machine's Claude usage).
+export const prefetchCount = machine => machine ? 5 : 20;
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 export function formatSessionTime(milliseconds) {

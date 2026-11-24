@@ -16,8 +16,11 @@ All notable changes to herdr-wake. The format follows [Keep a Changelog](https:/
 
 - **A Sessions panel for the Herdr desktop app** (`mods/herdr-wake-sessions/`): the closed sessions in a side panel with scope switch, filter, session facts, Resume, Fork and Copy. New for it: `resurrect --space <SPACE-ID>` (the new terminal joins that space, ahead of the guesses), `resurrect --ticket` (checks and writes the launch ticket, opens nothing, prints `{key, argv, cwd, title, space}`), `transcript`, `folder_exists` and `ended_ms` in `--json`, and the tab `hc run` opens is renamed after the session title when the app is open.
 
+- **The Sessions panel lists every Herdr machine.** Each connected machine of `hc machine ls` is asked in parallel (`hc exec --on`, an argument list, machine names checked, 15 seconds each, one slow or failing machine never blocks the others), with a machine picker in the header (All machines, This computer, each machine that answered), the machine at the start of a remote row's place line, in the filter and in the session's facts, and quiet footer lines for a machine without a herdr-wake that has `resurrect` or that is offline. Resume, Fork, the copy menu's resume command and summaries run on the session's own machine (the background summaries: newest 20 here, 5 per other machine). A session's tab opens in a space on its machine, and a machine with no space gets one.
+
 ### Fixed
 
+- **The panel's own timers.** It used `setTimeout`, which the Herdr shell does not have (the refresh after a Resume failed with that message); it uses `cx.timer.after` now.
 - **A relative `CLAUDE_CONFIG_DIR` in a recorded environment** is read under the session's folder by Claude's resume check, as Codex's `CODEX_HOME` already was (before, it was read under the folder of whoever ran the check).
 - **Text from records and files** is also stripped of direction-changing characters (U+202A to U+202E, U+2066 to U+2069) and the line and paragraph separators before it is printed or logged.
 

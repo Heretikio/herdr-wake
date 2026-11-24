@@ -20,6 +20,14 @@ export function iconButton(id, icon, action, t, spinning = false) {
     .child(svg(icon).size(15).when(spinning, (el) => el.spin(900)));
 }
 
+// The machine picker's button: the choice and a caret, opening the menu.
+export function pickerButton(id, label, action, t) {
+  return h_flex().id(id).flex_1().min_w(0).gap(5).px(9).py(3).rounded(8).items_center().text_size(12).cursor_pointer()
+    .bg(t.chrome).border_1().border_color(t.border).text_color(t.muted)
+    .hover(el => el.text_color(t.foreground)).on_click(action)
+    .child(div().min_w(0).truncate().child(label)).child(div().flex_none().text_size(10).child('▾'));
+}
+
 // A plain button; `primary` draws its border in the accent, `off` greys it out and says why on hover.
 export function button(id, child, action, t, primary = false, off = null) {
   const el = h_flex().id(id).gap(6).px(9).py(4).rounded(7).items_center().text_size(12).flex_none()
@@ -33,9 +41,11 @@ export function button(id, child, action, t, primary = false, off = null) {
 // space or worktree follows it. `gone`: the folder no longer exists, so it can't be resumed there:
 // red and struck through. Used by a row and by the session's header. A worktree gets the branch
 // icon before its name, as Herdr's spaces sidebar draws one.
-export function placeLine({ repo, tree, worktree }, gone, t) {
+export function placeLine({ repo, tree, worktree, machine }, gone, t) {
   const name = (text, color) => div().text_color(gone ? t.ansi1 : color).when(gone, el => el.line_through()).child(text);
+  // A session from another machine says which first: "laptop · repo › space".
   return h_flex().min_w(0).gap(4).items_center()
+    .when(Boolean(machine), el => el.child(div().flex_none().max_w(90).truncate().text_color(t.dim).child(`${machine} ·`)))
     .child(name(repo, tree ? t.muted : t.foreground).flex_none().max_w(tree ? 150 : 240).truncate())
     .when(Boolean(tree), el => el.child(div().flex_none().text_color(gone ? t.ansi1 : t.dim).child('›'))
       .when(Boolean(worktree), el => el.child(branchIcon(gone ? t.ansi1 : t.dim)))
