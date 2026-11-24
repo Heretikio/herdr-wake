@@ -138,7 +138,7 @@ fn rollout_name_matches(name: &str, id: &str) -> Option<bool> {
 
 /// What a rollout's first line says about who started the thread.
 #[derive(Debug, PartialEq, Eq)]
-enum Origin {
+pub(crate) enum Origin {
     /// A user's thread, or nothing to tell otherwise.
     User,
     /// `codex exec`, the IDE extension, the desktop app or an MCP client.
@@ -164,6 +164,12 @@ fn rollout_origin(path: &Path) -> Origin {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
         return Origin::User;
     };
+    meta_origin(&v)
+}
+
+/// What a rollout's first line `v` (the `session_meta` row) says about who
+/// started the thread. Anything unreadable counts as a user's thread.
+pub(crate) fn meta_origin(v: &serde_json::Value) -> Origin {
     if v.get("type").and_then(|t| t.as_str()) != Some("session_meta") {
         return Origin::User;
     }

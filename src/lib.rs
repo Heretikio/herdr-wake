@@ -15,6 +15,7 @@ pub mod private;
 pub mod record;
 pub mod report;
 pub mod setup;
+pub mod transcripts;
 pub mod trust;
 pub mod wake;
 pub mod watch;
