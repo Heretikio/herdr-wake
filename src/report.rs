@@ -1297,6 +1297,8 @@ fn claude_checks(os: Os, ctx: &Ctx, probes: &dyn Probes, out: &mut Vec<Finding>)
         (true, true) => Finding::ok(C, format!("hooks present in {}", settings.display())),
     });
 
+    out.push(claude_retention(&user, &settings));
+
     let managed = PathBuf::from(match os {
         Os::MacOs => "/Library/Application Support/ClaudeCode/managed-settings.json",
         Os::Linux => "/etc/claude-code/managed-settings.json",
@@ -1328,6 +1330,30 @@ fn claude_checks(os: Os, ctx: &Ctx, probes: &dyn Probes, out: &mut Vec<Finding>)
             "remove that setting (a managed setting needs your administrator)",
         )
     });
+}
+
+/// How long Claude Code keeps transcripts when its settings do not say.
+const CLAUDE_RETENTION_DAYS: u64 = 30;
+
+/// Information, never a failure: Claude Code deletes transcripts after
+/// `cleanupPeriodDays` (30 days unless `settings.json` sets it), and
+/// `herdr-wake resurrect` cannot bring back a Claude session whose
+/// transcript is gone.
+fn claude_retention(user: &serde_json::Value, settings: &Path) -> Finding {
+    const C: &str = "claude transcripts";
+    let (days, source) = match user.get("cleanupPeriodDays").and_then(|v| v.as_u64()) {
+        Some(n) => (n, "set in settings.json"),
+        None => (CLAUDE_RETENTION_DAYS, "the default"),
+    };
+    Finding::ok(
+        C,
+        format!(
+            "Claude Code deletes transcripts older than {days} days (cleanupPeriodDays, {source}), \
+             and `herdr-wake resurrect` cannot bring back a Claude session whose transcript is \
+             deleted. To keep them longer, raise cleanupPeriodDays in {}",
+            settings.display()
+        ),
+    )
 }
 
 fn codex_checks(ctx: &Ctx, probes: &dyn Probes, out: &mut Vec<Finding>) {

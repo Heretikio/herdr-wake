@@ -4,6 +4,13 @@ All notable changes to herdr-wake. The format follows [Keep a Changelog](https:/
 
 ## [Unreleased]
 
+### Added
+
+- **`herdr-wake resurrect`: bring back a closed session.** `herdr-wake resurrect [WORD] [--here | --folder DIR] [--agent NAME] [--limit N] [--json]` lists the sessions you closed or lost, newest first, numbered, with age, agent, folder, title, how it ended, a `!` where the flags include a permission bypass, and where the row came from. `herdr-wake resurrect <number or session id> [--print] [--fork]` checks the session the way a wake does (valid id, not running, folder exists and is safe, program is safe, the agent's session file exists, `restore_bypass`) and opens a new herdr-core terminal in its folder that resumes it, or prints `cd <folder> && <command>`. `--fork` resumes a Claude Code session as a copy. The recorded flags are replayed, bypass included, because you asked; `restore_bypass = false` still drops them. The new terminal joins the Herdr space of the terminal you run it from, else the space whose folder holds the session when the desktop app is open, else it has no space label (the phone app and `hc ls` show it, the desktop app does not). A session that is running is never listed.
+- **A history journal.** herdr-wake now keeps one private file per recorded session in `~/.local/state/herdr-wake/history/` (agent, session id, folder, the exact flags, program, environment allowlist, terminal, start and end, and how it ended: quit, killed, replaced, forgotten, unknown), written by the hook, the watcher, the wrapper, `forget` and `off`. `history_limit` in `config.toml` caps it (default 500, oldest activity pruned first, 0 keeps none).
+- **Transcript fallback.** Sessions the journal does not know (from before install, or run outside Herdr) are read from Claude Code's and Codex's own transcripts: the first and last 128 KB of each file, cached by size and modification time. Flags there are rebuilt from Claude's first recorded permission mode and marked as from the transcript; Codex gets none. Pi and OpenCode have no fallback yet.
+- **`doctor`** says how long Claude Code keeps transcripts (`cleanupPeriodDays`, 30 days by default) and that `resurrect` cannot bring back a session whose transcript is gone. Information only, never a failure.
+
 ## [0.1.2] - 2026-11-21
 
 ### Added

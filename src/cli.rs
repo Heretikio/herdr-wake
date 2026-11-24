@@ -153,8 +153,9 @@ enum Cmd {
         With no argument, or a word to search for, it lists the sessions you closed, newest \
         first, numbered: those herdr-wake recorded (with their exact flags), and, for \
         Claude Code and Codex, sessions that only left a transcript (flags rebuilt from the \
-        transcript are marked). A session that is running is not listed. The word must \
-        appear in the title, folder, session id or agent name.\n\n\
+        transcript are marked). A session that is running is not listed. Every word must \
+        appear in the title, folder, session id or agent name. A word made only of digits is \
+        read as a number.\n\n\
         With a number from the last listing, or a session id, it checks the session the way \
         a wake does (valid id, folder exists and is safe, program is safe, session file \
         exists) and opens a new herdr-core terminal in the session's folder that resumes \

@@ -20,7 +20,7 @@ Six things to know first.
 restore_bypass = false
 ```
 
-It takes effect at the next wake, for sessions already recorded too. With it, these flags are left out of the resume command:
+It takes effect at the next wake, for sessions already recorded too. It also applies to `herdr-wake resurrect`, which otherwise replays the recorded flags, bypass included, because you asked for that session by hand. With it, these flags are left out of the resume command:
 
 | Agent | Dropped when `restore_bypass = false` |
 |---|---|
@@ -66,7 +66,7 @@ On Linux, `--before-login` has no effect: install always tries to turn on linger
 
 Anyone who can use your herdr-core (every paired app and connected machine) can type into the resumed agents, as into any terminal there. What herdr-wake starts at boot is not theirs to choose through a label: a record is resumed only when it matches the private copy herdr-wake itself kept on this machine (see [Security](#security)).
 
-**5. Never run herdr-wake with `sudo`.** Everything installs for your user. `install`, `uninstall`, `adopt`, `resume`, `forget`, `off` and `on` refuse to run as root. The one step that needs root is the optional `--before-login` LaunchDaemon on macOS: herdr-wake prints those `sudo` commands for you to read and run. The installed daemon is a root-owned file that runs herdr-wake as you.
+**5. Never run herdr-wake with `sudo`.** Everything installs for your user. `install`, `uninstall`, `adopt`, `resume`, `forget`, `off`, `on` and `resurrect` refuse to run as root. The one step that needs root is the optional `--before-login` LaunchDaemon on macOS: herdr-wake prints those `sudo` commands for you to read and run. The installed daemon is a root-owned file that runs herdr-wake as you.
 
 **6. Three things the real reboot tests showed.**
 
@@ -149,6 +149,33 @@ herdr-wake: could not resume claude session 3f2a...: session not found. To retry
 
 The full design, including what the prototype changed, is in [docs/DESIGN.md](docs/DESIGN.md). The decisions behind it are in [docs/DECISIONS.md](docs/DECISIONS.md).
 
+## Bring back a closed session
+
+`herdr-wake resurrect` lists the agent sessions you closed (or lost) and brings one back in a new terminal, in its folder, with the flags it ran with, through the same checks a wake makes. It works from a phone or over SSH too, because it only needs `hc`.
+
+```
+$ herdr-wake resurrect
+#  AGE  AGENT   PLACE            TITLE                      ENDED   !  SOURCE
+1  3h   claude  ~/git/webshop    Add iDEAL to the checkout  quit    !  wake
+2  1d   codex   ~/git/api        fix the login bug          unknown    transcript
+3  2d   claude  ~/git/webshop    Release notes for 1.4      killed     wake, transcript gone
+! restores a permission bypass
+
+$ herdr-wake resurrect checkout --here     # search words, only this folder and below
+$ herdr-wake resurrect 1                   # open row 1 in a new terminal
+$ herdr-wake resurrect 1 --print           # print `cd <folder> && <command>` instead
+$ herdr-wake resurrect 1 --fork            # Claude Code: resume as a copy
+$ herdr-wake resurrect --json              # the same list for scripts
+```
+
+- **Where the list comes from.** herdr-wake keeps a small private file per recorded session in `~/.local/state/herdr-wake/history/` (agent, session id, folder, the exact flags, program, the environment allowlist, when it started and how it ended: quit, killed, replaced by a new session in the same terminal, forgotten, or unknown). Sessions from before you installed, or run outside Herdr, are read from Claude Code's and Codex's own transcripts (`~/.claude/projects`, `~/.codex/sessions`; only the first and last 128 KB of each file). For those, flags are rebuilt from the transcript and the row says `transcript`: Claude's first recorded permission mode becomes `--dangerously-skip-permissions` or `--permission-mode <mode>`, Codex gets no flags. Pi and OpenCode are listed only from the journal. `history_limit` in `config.toml` caps the journal (default 500).
+- **A session that is running is not listed**: a live record on a Herdr terminal (when core is running; `resurrect` never starts it), a Claude session file whose process is alive, or an agent whose command line names the session.
+- **A number is a row of the last listing** (a word made only of digits is read as a number). If you give filters with the number they must be the ones that listing used.
+- **Bypass flags are replayed**, because you started this. `restore_bypass = false` still drops them, and the folder must pass the same safety check as at wake time. Resurrect checks the session id, that the session is not running, the folder, the program, and that the agent's session file exists, and tells you which check failed.
+- **Where the terminal appears.** Run from a Herdr terminal, it joins that terminal's space. Otherwise it joins the space whose folder holds the session, when the desktop app is open (`herdr-app ls`). With neither, the terminal has no space label: the phone app and `hc ls` show it, the desktop app does not.
+- **Claude deletes old transcripts** (after 30 days unless `cleanupPeriodDays` in its `settings.json` says otherwise) and cannot resume a session whose transcript is gone. Such rows say `transcript gone`. `herdr-wake doctor` tells you the current setting.
+- The agent's own hook records the resurrected session in its new terminal as for any session you start, so it comes back after the next reboot too.
+
 ## Commands
 
 ```
@@ -167,6 +194,7 @@ Commands:
   on         Switch herdr-wake back on for a terminal that was switched off
   resume     Let a failed session resume again, and print the command to run it now
   adopt      Record agents that were already running before herdr-wake was installed
+  resurrect  List closed agent sessions and bring one back in a new terminal
   help       Print this message or the help of the given subcommand(s)
 
 Options:
@@ -184,6 +212,8 @@ Terminals are named the way herdr-core names them, for example `t3`.
 - `herdr-wake off t3` switches herdr-wake off for that terminal: it drops the record, and from then on nothing started there is recorded or resumed. `herdr-wake on t3` switches it back on.
 - `herdr-wake resume t3` re-arms a session that failed, so it resumes at the next recovery, and prints the command to run it now. It does not start the agent itself. It also accepts a record shown as `untrusted`: read the command it prints before you rely on it.
 - `herdr-wake adopt` records agents that were already running before you installed. It can do this for Claude Code only; restart Codex, Pi and OpenCode sessions once to record them.
+
+- `herdr-wake resurrect [WORD] [--here | --folder DIR] [--agent NAME] [--limit N] [--json]` lists closed sessions, newest first, and `herdr-wake resurrect <number or session id> [--print] [--fork]` brings one back (see [Bring back a closed session](#bring-back-a-closed-session)). It refuses to run as root.
 
 `hook`, `watch`, `shell` and `boot` are internal: agents, herdr-core and the boot service call them.
 
@@ -341,11 +371,57 @@ Options:
           Print help (see a summary with '-h')
 ```
 
+```
+$ herdr-wake resurrect --help
+List closed agent sessions and bring one back in a new terminal.
+
+With no argument, or a word to search for, it lists the sessions you closed, newest first, numbered: those herdr-wake recorded (with their exact flags), and, for Claude Code and Codex, sessions that only left a transcript (flags rebuilt from the transcript are marked). A session that is running is not listed. Every word must appear in the title, folder, session id or agent name. A word made only of digits is read as a number.
+
+With a number from the last listing, or a session id, it checks the session the way a wake does (valid id, folder exists and is safe, program is safe, session file exists) and opens a new herdr-core terminal in the session's folder that resumes it. The recorded flags are replayed, a permission bypass included, because you asked; `restore_bypass = false` in config.toml still drops them. --print prints the command instead (`cd <folder> && <command>`). --fork resumes a Claude Code session as a copy.
+
+The terminal belongs to a Herdr space when one can be found; without one it shows in the phone app and `hc ls` but not in the desktop app.
+
+Reads herdr-core's socket to leave out running sessions and never starts herdr-core itself. Run it as your own user, never as root.
+
+Usage: herdr-wake resurrect [OPTIONS] [TARGET]
+
+Arguments:
+  [TARGET]
+          A word to search for, a number from the last listing, or a session id
+
+Options:
+      --here
+          Only sessions in the current folder or inside it
+
+      --folder <DIR>
+          Only sessions in this folder or inside it
+
+      --agent <NAME>
+          Only sessions of this agent (claude, codex, pi, opencode)
+
+      --limit <N>
+          Most rows to list, 0 for all
+          
+          [default: 20]
+
+      --json
+          Print the listing as JSON
+
+      --print
+          Print the command that brings the session back instead of opening a terminal
+
+      --fork
+          Resume a Claude Code session as a copy (--fork-session)
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
 </details>
 
 ### What `doctor` checks
 
-herdr-wake's own `config.toml` (a file that cannot be parsed is a `FAIL` with the parser's message), herdr-core's `shell` setting (present, absolute, the file exists and is executable), the saved real shell, whether core is running and answers, the core version (0.1.16 or newer), kept terminals that have had no program for more than 5 seconds (what a broken `shell` setting looks like), the boot service, `boot.env` and whether its `PATH` covers every recorded agent, then per OS: FileVault, auto-login and when agents will come back (macOS); systemd as PID 1, linger, the user unit, and WSL (Linux). Per agent: Claude's hooks and whether `disableAllHooks` or `allowManagedHooksOnly` blocks them, Codex's hook and whether hooks are switched off, Pi's extension, OpenCode's plugin entry. When `pi --version` or `opencode --version` can be read (3 seconds each), a Pi older than 0.79.4 or an OpenCode 2.x older than 2.0.28 is a `warn`; an agent that is not installed gets no version line.
+herdr-wake's own `config.toml` (a file that cannot be parsed is a `FAIL` with the parser's message), herdr-core's `shell` setting (present, absolute, the file exists and is executable), the saved real shell, whether core is running and answers, the core version (0.1.16 or newer), kept terminals that have had no program for more than 5 seconds (what a broken `shell` setting looks like), the boot service, `boot.env` and whether its `PATH` covers every recorded agent, then per OS: FileVault, auto-login and when agents will come back (macOS); systemd as PID 1, linger, the user unit, and WSL (Linux). Per agent: Claude's hooks and whether `disableAllHooks` or `allowManagedHooksOnly` blocks them, one informational line on how long Claude keeps transcripts (`cleanupPeriodDays`, 30 days by default; `resurrect` cannot bring back a session whose transcript is deleted), Codex's hook and whether hooks are switched off, Pi's extension, OpenCode's plugin entry. When `pi --version` or `opencode --version` can be read (3 seconds each), a Pi older than 0.79.4 or an OpenCode 2.x older than 2.0.28 is a `warn`; an agent that is not installed gets no version line.
 
 The Codex check always ends with a `warn` reminding you to approve the hook in Codex's `/hooks`, because herdr-wake cannot read that approval reliably. If you do not use Codex, ignore it.
 
@@ -361,6 +437,7 @@ Settings live in `~/.config/herdr-wake/config.toml` (or under `$XDG_CONFIG_HOME`
 | `stagger_ms` | `1500` | Gap between agent starts after the first of each kind, in milliseconds. |
 | `first_alone_ms` | `8000` | How long the first agent of each kind starts alone, in milliseconds. The wait ends early once that agent reports in. |
 | `exclude_dirs` | `[]` | Folders (and everything under them) whose sessions are never recorded and never resumed. Absolute paths, or paths starting with `~/`. Whole folder names are compared: `~/private` does not cover `~/private-notes`. |
+| `history_limit` | `500` | How many closed sessions the history journal keeps for `herdr-wake resurrect`. The ones with the oldest activity are removed first. `0` keeps no journal. |
 | `programs` | none | A table, by agent name (`claude`, `codex`, `pi`, `opencode`): the program to resume that agent with instead of the one recorded. For agents you start through a wrapper script: the resume goes through it again. An absolute path or one starting with `~/`; owned by you or root, executable, not writable by group or others. The resume command keeps the agent's flags and session, only the program changes. Used only while `config.toml` and its folder are yours alone (not group- or other-writable, not symlinks); `doctor` shows each entry and warns about a name that is not an agent. See [docs/LIMITS.md](docs/LIMITS.md#records). |
 | `real_shell` | written by install | herdr-core's `shell` setting as it was before install, as a list, for example `["/bin/zsh", "-l"]`. herdr-wake hands over to it. When absent, it uses `$SHELL` as a login shell, then `/bin/sh`. Uninstall puts it back. |
 
@@ -434,7 +511,8 @@ A security audit of the source was done on 2026-11-10: [docs/SECURITY_AUDIT.md](
 - **Secrets on a command line are left out, as far as herdr-wake can tell.** Never stored: inline JSON given to Claude's `--settings`, `--mcp-config` or `--agents` (a file path for the same flag is kept), a Codex `-c` override whose key or value contains `key`, `token`, `secret`, `password`, `auth` or `bearer`, and any flag value holding a URL with a user name or password (OpenCode's `--server` keeps its address and loses the password). The log names the flag that was left out; the resumed session starts without it. Other flag values are stored as you typed them and are visible to every client of your herdr-core, so do not put secrets on an agent's command line.
 - **No network.** The binary makes no network requests. Only the install script downloads, over HTTPS, from GitHub releases. Its checksum guards against a damaged download, not against a tampered release. Releases built by the workflow in this repository carry a build provenance attestation: `gh attestation verify herdr-wake-<version>-<target>.tar.gz --repo Heretikio/herdr-wake`. No release has been published yet, so this has not been exercised.
 - **No root.** See point 5 under [Before you install](#before-you-install).
-- **Private files.** herdr-wake's config, log, records and backups are readable by you only (0700 folders, 0600 files).
+- **The history journal** (`~/.local/state/herdr-wake/history/`) holds the same facts as a record, filtered the same way, and stays after a session ends. Its files are private like the rest. It is a list of what ran in which folder: delete the folder, or set `history_limit = 0`, if you do not want that kept. `resurrect` replays the recorded flags, bypass included, only when you ask for one session; every wake-time check still applies.
+- **Private files.** herdr-wake's config, log, records, history and backups are readable by you only (0700 folders, 0600 files).
 - **Nothing in shell history.** The resumed agent is started directly, not typed into your shell.
 - **Hooks fail quietly.** `herdr-wake hook` never prints and always exits 0, so it cannot break your agent; problems go to the log. Text from records and hook payloads is stripped of control characters before it is printed or logged.
 - **Codex trust.** herdr-wake never writes Codex's hook trust. You approve the hook yourself in `/hooks`.
@@ -452,6 +530,7 @@ Every known limit and untested area is in [docs/LIMITS.md](docs/LIMITS.md). The 
 - Codex: approve the hook once in `/hooks`; two Codex sessions started in the same folder at the same time cannot be told apart, and neither is recorded.
 - OpenCode v2: if the session no longer exists, OpenCode opens a new chat; herdr-wake reports that as "unconfirmed" but cannot prevent it.
 - `adopt` handles Claude Code only.
+- `resurrect`: Pi and OpenCode sessions are listed only from herdr-wake's own journal; Claude deletes old transcripts and cannot resume them (shown as `transcript gone`); a terminal opened without a Herdr space shows in the phone app and `hc ls` but not in the desktop app. See [docs/LIMITS.md](docs/LIMITS.md#resurrect-and-the-history-journal).
 - If you kill an agent you started by hand while its shell keeps running, herdr-wake treats it as a quit and does not resume it.
 - herdr-core releases every few days and has no stable API for this; a core update can break herdr-wake. Run `herdr-wake doctor` after updating core.
 

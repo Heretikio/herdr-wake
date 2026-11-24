@@ -687,6 +687,46 @@ fn claude_hook_present_passes_even_with_comments_and_trailing_commas() {
 }
 
 #[test]
+fn doctor_says_how_long_claude_keeps_transcripts_and_never_fails_on_it() {
+    // The default, when settings.json does not say.
+    let (mut f, p) = healthy();
+    p.file(CLAUDE_SETTINGS, CLAUDE_OURS);
+    let all = run(&mut f, &p, Os::MacOs);
+    let x = find(&all, "claude transcripts");
+    assert_eq!(x.level, Level::Ok);
+    assert!(
+        x.detail.contains("30 days") && x.detail.contains("the default"),
+        "{}",
+        x.detail
+    );
+    assert!(x.detail.contains("resurrect"), "{}", x.detail);
+    assert!(x.detail.contains("cannot bring back"), "{}", x.detail);
+    assert!(x.detail.contains(CLAUDE_SETTINGS), "{}", x.detail);
+    assert!(!x.detail.contains('\u{2014}'));
+
+    // Set by the user.
+    let (mut f, p) = healthy();
+    p.file(
+        CLAUDE_SETTINGS,
+        &CLAUDE_OURS.replace("\"model\": \"opus\",", "\"cleanupPeriodDays\": 365,"),
+    );
+    let all = run(&mut f, &p, Os::MacOs);
+    let x = find(&all, "claude transcripts");
+    assert_eq!(x.level, Level::Ok);
+    assert!(
+        x.detail.contains("365 days") && x.detail.contains("set in settings.json"),
+        "{}",
+        x.detail
+    );
+
+    // Not installed: no line.
+    let (mut f, p) = healthy();
+    assert!(run(&mut f, &p, Os::MacOs)
+        .iter()
+        .all(|x| x.check != "claude transcripts"));
+}
+
+#[test]
 fn claude_installed_without_our_hook_fails() {
     let (mut f, p) = healthy();
     p.dir("/home/u/.claude");

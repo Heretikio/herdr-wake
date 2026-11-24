@@ -10,6 +10,8 @@ Built on `DECISIONS.md` and the four docs in `research/`. Vocabulary follows the
 
 **Wake** (after a reboot). The boot service runs `herdr-wake boot`, which starts herdr-core. Core recreates each kept terminal at once and launches its configured `shell`, which is `herdr-wake shell`. That process reads the terminal's record. No live record: it replaces itself with the user's real shell. Live record: it waits its turn at the gate, starts the agent as a child, and when the agent exits it replaces itself with the real shell.
 
+**Resurrect** (on demand, any time). `herdr-wake resurrect` lists sessions that are no longer running and starts one again, in a new terminal, by a person's request. The list comes from the history journal (written by Record and Forget as sessions start and end) and, for Claude Code and Codex, from the agents' own transcripts. Bringing one back runs the wake checks (`wake::launch_decision`) on a record rebuilt from the row, opens a terminal with `hc run`, and that terminal runs `herdr-wake resurrect --run <key>`, which checks again, runs the agent in the foreground and hands over to the real shell. The agent's hook then records it like any session.
+
 ## Modules
 
 | Module | Interface (what callers must know) | Hides |
@@ -22,7 +24,10 @@ Built on `DECISIONS.md` and the four docs in `research/`. Vocabulary follows the
 | `gate` | `Gate::enter(agent) -> Permit`. | Stagger across independent `herdr-wake shell` processes: a file lock plus timestamps. First agent of each kind starts alone and is confirmed, the rest follow 1.5 s apart. |
 | `setup` | `install(options) -> Report`, `uninstall() -> Report`, both with dry-run. | Order of operations, backups, comment-preserving edits to JSON, JSONC and TOML, the saved real shell, remote install over SSH. |
 | `report` | `status()`, `doctor()`, `boot_summary()`. | Read-only checks. Never calls `hc` (any `hc` command starts core). |
-| `cli` | Subcommands: `install`, `uninstall`, `status`, `doctor`, `forget`, `resume`, `adopt`, plus internal `hook`, `watch`, `shell`, `boot`. | Argument parsing only. |
+| `history` | `started(dir, limit, terminal, record, now)`, `ended(dir, limit, agent, id, fallback, ending, now)`, `load`, `read_all`. `Entry` turns back into a `Record` (`to_record`). | One private JSON file per session (agent plus id), atomic writes, the cap, the rule that the first definite ending wins. Callers log a failure and never fail over it. |
+| `transcripts` | `scan_claude`, `scan_codex`, `meta_of`, `Cache`: what a transcript says (folder, titles, first prompt, first permission mode). | Bounded reads (first and last 128 KB), the stat-keyed cache, what counts as a sub-agent or a non-interactive run, Claude's and Codex's file layouts. |
+| `resurrect` | `collect(ctx) -> rows`, `select`, `resolve`, `prepare(row, ctx, fork) -> Launch`, `write_ticket`, `open_terminal`, `run_ticket`. `Tools` is the seam for `hc` and `herdr-app`. | Merging journal and transcripts, finding running sessions, the table and JSON, numbers and the last listing, the one-use launch ticket, picking a Herdr space. Reuses `wake::launch_decision`, so a resurrect passes the same checks as a wake. |
+| `cli` | Subcommands: `install`, `uninstall`, `status`, `doctor`, `forget`, `resume`, `adopt`, `resurrect`, plus internal `hook`, `watch`, `shell`, `boot`. | Argument parsing only. |
 
 Two seams are real because they have several adapters each: `Agent` (four) and `Platform` (two now, three later). `Core` has a production adapter and a fake for tests. Everything else is a plain module with no trait.
 
@@ -36,6 +41,7 @@ Two seams are real because they have several adapters each: `Agent` (four) and `
 6. **No secrets in records.** Env is an allowlist (`PATH`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `PI_CODING_AGENT_DIR`, `OPENCODE_CONFIG_DIR` and similar). Anything matching `*_KEY`, `*_TOKEN`, `*_PASSWORD` is never stored.
 7. **Never check on core with `hc`.** Connect to the socket directly, or look for the process.
 8. **Edits to other tools' files are surgical.** Add or remove only herdr-wake's own entries, keep comments and order, back up first. Codex hook trust is hash-bound, so the hook command string never changes between versions.
+9. **The history journal is a side record.** A write that fails is logged and ignored: a hook, a watcher or the wrapper never fails over it, and nothing at wake time reads it. Only `resurrect` reads it, and it checks a session again (the wake checks) before it runs anything.
 
 ## Corrections from the prototype
 
@@ -58,9 +64,12 @@ Measured: recovery starts 0.19 s after core starts and before any client; a sock
 | What | Where |
 |---|---|
 | Session records | Labels on each herdr-core terminal. They survive restart and reboot and disappear with the terminal. |
-| Settings | `~/.config/herdr-wake/config.toml`: on/off, restore bypass (default on), auto-continue (default off), attempts, stagger, excluded folders, the saved real shell. |
+| Settings | `~/.config/herdr-wake/config.toml`: on/off, restore bypass (default on), auto-continue (default off), attempts, stagger, excluded folders, history cap, the saved real shell. |
 | Boot environment | `~/.config/herdr-wake/boot.env`, mode 0600: `PATH`, `LANG`, `LC_*` captured at install. |
 | Log, gate file, last boot summary, backups | `~/.local/state/herdr-wake/` |
+| History journal | `~/.local/state/herdr-wake/history/`: one file per session, kept after it ends, capped by `history_limit`. |
+| Transcript cache | `~/.local/state/herdr-wake/transcripts.json`: what resurrect read from transcripts, by file size and modification time. |
+| Resurrect tickets and last listing | `~/.local/state/herdr-wake/resurrect/`: one-use launch tickets and the listing that numbers refer to. |
 | Boot service | macOS: `~/Library/LaunchAgents/dev.heretik.herdr-wake.plist` (default) or a LaunchDaemon with `--before-login`. Linux: `~/.config/systemd/user/herdr-wake.service` plus linger. |
 
 ## Testing
