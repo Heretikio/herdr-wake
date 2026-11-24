@@ -919,8 +919,21 @@ fn ticket_file(env: &BTreeMap<String, String>, home: &Path, key: &str) -> PathBu
     paths::resurrect_dir(env, home).join(format!("run-{key}.json"))
 }
 
+/// The marker that a launch of this session is pending: one file per
+/// agent and session id, made with `create_new` so two launches racing for
+/// the same session have one winner. It holds the ticket's key.
+fn pending_file(
+    env: &BTreeMap<String, String>,
+    home: &Path,
+    agent: AgentKind,
+    id: &str,
+) -> PathBuf {
+    paths::resurrect_dir(env, home).join(format!("pending-{agent}-{}", record::plain_name(id)))
+}
+
 /// Writes the ticket `--run <key>` will read, and removes tickets that are
-/// long out of date. Returns the key.
+/// long out of date. Returns the key. Fails with `AlreadyExists` while an
+/// unexpired ticket for the same session is pending.
 pub fn write_ticket(
     env: &BTreeMap<String, String>,
     home: &Path,
@@ -939,19 +952,56 @@ pub fn write_ticket(
                 .ok()
                 .and_then(|t| t.elapsed().ok())
                 .is_some_and(|age| age.as_millis() > u128::from(TICKET_TTL_MS) * 6);
-            if name.starts_with("run-") && stale {
+            let ours = ["run-", "claimed-", "pending-"]
+                .iter()
+                .any(|p| name.starts_with(p));
+            if ours && stale {
                 let _ = std::fs::remove_file(f.path());
             }
         }
     }
+    let e = &launch.entry;
+    let pending = pending_file(env, home, e.agent, &e.session_id);
+    let mut made = crate::private::create_new(&pending, key.as_bytes());
+    if made
+        .as_ref()
+        .is_err_and(|e| e.kind() == std::io::ErrorKind::AlreadyExists)
+    {
+        // A marker whose terminal never came up lapses with its ticket.
+        let lapsed = std::fs::symlink_metadata(&pending)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age.as_millis() > u128::from(TICKET_TTL_MS));
+        if lapsed {
+            let _ = std::fs::remove_file(&pending);
+            made = crate::private::create_new(&pending, key.as_bytes());
+        }
+    }
+    made.map_err(|err| {
+        if err.kind() == std::io::ErrorKind::AlreadyExists {
+            std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "a launch of this session is already pending: wait for its terminal, or for \
+                 the ticket to lapse (10 minutes)",
+            )
+        } else {
+            err
+        }
+    })?;
     let ticket = Ticket {
         v: TICKET_VERSION,
         created_ms: now_ms,
         fork,
         entry: launch.entry.clone(),
     };
-    let body = serde_json::to_vec(&ticket).map_err(std::io::Error::other)?;
-    crate::private::write(&ticket_file(env, home, &key), &body)?;
+    let written = serde_json::to_vec(&ticket)
+        .map_err(std::io::Error::other)
+        .and_then(|body| crate::private::write(&ticket_file(env, home, &key), &body));
+    if let Err(err) = written {
+        let _ = std::fs::remove_file(&pending);
+        return Err(err);
+    }
     Ok(key)
 }
 
@@ -965,16 +1015,34 @@ fn take_ticket(
     if !valid_key(key) {
         return Err("the launch key is not valid".to_string());
     }
+    // Claim it first: a rename is atomic, so of two processes started with
+    // the same key exactly one gets the ticket.
+    static CLAIMS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let file = ticket_file(env, home, key);
-    let md = std::fs::symlink_metadata(&file)
+    let claimed = paths::resurrect_dir(env, home).join(format!(
+        "claimed-{}-{}.json",
+        std::process::id(),
+        CLAIMS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::rename(&file, &claimed)
         .map_err(|_| "there is no launch ticket for that key (it is used once)".to_string())?;
-    if !md.is_file() || md.len() > 1024 * 1024 {
-        return Err("the launch ticket is not a plain file".to_string());
-    }
-    let bytes = std::fs::read(&file).map_err(|e| format!("cannot read the launch ticket: {e}"))?;
-    let _ = std::fs::remove_file(&file);
-    let ticket: Ticket = serde_json::from_slice(&bytes)
+    let read = (|| {
+        let md = std::fs::symlink_metadata(&claimed)
+            .map_err(|e| format!("cannot read the launch ticket: {e}"))?;
+        if !md.is_file() || md.len() > 1024 * 1024 {
+            return Err("the launch ticket is not a plain file".to_string());
+        }
+        std::fs::read(&claimed).map_err(|e| format!("cannot read the launch ticket: {e}"))
+    })();
+    let _ = std::fs::remove_file(&claimed);
+    let ticket: Ticket = serde_json::from_slice(&read?)
         .map_err(|_| "the launch ticket cannot be read".to_string())?;
+    // The ticket is ours now: the launch is under way, so the pending mark
+    // goes (if it is still this ticket's).
+    let pending = pending_file(env, home, ticket.entry.agent, &ticket.entry.session_id);
+    if std::fs::read_to_string(&pending).is_ok_and(|k| k == key) {
+        let _ = std::fs::remove_file(&pending);
+    }
     if ticket.v != TICKET_VERSION {
         return Err("the launch ticket is from another version".to_string());
     }
@@ -997,6 +1065,8 @@ pub fn run_ticket(
     env: &BTreeMap<String, String>,
     home: &Path,
     key: &str,
+    core: &mut dyn Core,
+    tools: &dyn Tools,
     say: &dyn Fn(&str),
 ) -> std::io::Error {
     let cfg = match Config::load(&paths::config_file(env, home)) {
@@ -1016,7 +1086,7 @@ pub fn run_ticket(
         }
     };
     let folder = ticket.entry.cwd.clone();
-    let row = Row {
+    let mut row = Row {
         title: None,
         last_ms: 0,
         source: Source::Wake,
@@ -1027,15 +1097,16 @@ pub fn run_ticket(
         transcript_mtime_ms: 0,
         entry: ticket.entry,
     };
-    let mut core = crate::report::NoCore;
     let launch = {
         let mut ctx = Ctx {
             platform,
-            core: &mut core,
+            core,
             env,
             home,
             cfg: &cfg,
         };
+        // The session may have come up since the ticket was made.
+        row.open = is_open_now(&mut ctx, tools, &row.entry);
         prepare(&row, &mut ctx, ticket.fork)
     };
     match launch {
@@ -1065,6 +1136,18 @@ pub fn run_ticket(
     wake::exec_shell(platform, env, home, &cfg, Some(&folder))
 }
 
+/// True when the session of `entry` is running now, by every sign
+/// `collect` looks for.
+fn is_open_now(ctx: &mut Ctx, tools: &dyn Tools, entry: &Entry) -> bool {
+    let mut claude_dirs = BTreeSet::new();
+    claude_dirs.insert(transcripts::claude_dir(ctx.env, ctx.home));
+    claude_dirs.insert(entry_claude_dir(entry, ctx.home));
+    let open = open_sessions(ctx, tools, &claude_dirs);
+    let (path, _) = entry_transcript(entry, ctx.env, ctx.home);
+    let mtime = path.as_deref().map_or(0, file_mtime_ms);
+    open.contains(entry.agent, &entry.session_id) || is_fresh(ctx.platform.now_ms(), mtime)
+}
+
 /// The real `herdr-wake resurrect --run`: never returns normally.
 pub fn run_entry(platform: &dyn Platform, env: BTreeMap<String, String>, key: &str) -> ! {
     let home = env
@@ -1074,7 +1157,15 @@ pub fn run_entry(platform: &dyn Platform, env: BTreeMap<String, String>, key: &s
     let say = |line: &str| {
         let _ = writeln!(std::io::stderr(), "{line}");
     };
-    let err = run_ticket(platform, &env, &home, key, &say);
+    let mut core: Box<dyn Core> = match crate::core::socket::connect(
+        &crate::core::socket::socket_path(&env, &home),
+        Duration::from_secs(2),
+    ) {
+        Ok(c) => Box::new(c),
+        Err(_) => Box::new(crate::report::NoCore),
+    };
+    let tools = SystemTools { env: env.clone() };
+    let err = run_ticket(platform, &env, &home, key, core.as_mut(), &tools, &say);
     let _ = writeln!(std::io::stderr(), "herdr-wake: cannot start a shell: {err}");
     std::process::exit(1)
 }

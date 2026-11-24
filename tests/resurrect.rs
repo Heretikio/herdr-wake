@@ -1084,7 +1084,16 @@ fn run_ticket(w: &World, key: &str) -> (std::io::Error, Vec<String>) {
     let say = |s: &str| said.borrow_mut().push(s.to_string());
     let mut env = w.f.env.clone();
     env.insert("SHELL".into(), "/bin/zsh".into());
-    let err = rs::run_ticket(&w.f.platform, &env, &w.f.home, key, &say);
+    let mut core = w.f.core.clone();
+    let err = rs::run_ticket(
+        &w.f.platform,
+        &env,
+        &w.f.home,
+        key,
+        &mut core,
+        &FakeTools::ok(""),
+        &say,
+    );
     (err, said.into_inner())
 }
 
@@ -1401,4 +1410,136 @@ fn nothing_is_started_by_listing() {
     let _: &FakePlatform = &w.f.platform;
     let _ = w.f.platform.now_ms();
     let _ = w.f.core.hello();
+}
+
+// ------------------------------------------- one launch per session
+
+#[test]
+fn of_several_processes_with_one_key_exactly_one_runs_the_agent() {
+    let mut w = World::new();
+    let l = launch_of(&mut w, &[]);
+    let key = rs::write_ticket(&w.f.env, &w.f.home, w.now, &l, false).unwrap();
+    for _ in 0..8 {
+        w.f.platform
+            .push_run_result(Ok(ExitInfo::exited(900, 0, 1)));
+    }
+    let said: Vec<Vec<String>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..8)
+            .map(|_| scope.spawn(|| run_ticket(&w, &key).1))
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert_eq!(w.f.platform.runs().len(), 1, "the agent ran once");
+    assert_eq!(said.iter().filter(|s| s.is_empty()).count(), 1);
+    assert!(said
+        .iter()
+        .filter(|s| !s.is_empty())
+        .all(|s| s[0].contains("no launch ticket")));
+}
+
+#[test]
+fn a_second_launch_of_a_pending_session_is_refused_until_the_first_starts_or_lapses() {
+    let mut w = World::new();
+    let l = launch_of(&mut w, &[]);
+    let key = rs::write_ticket(&w.f.env, &w.f.home, w.now, &l, false).unwrap();
+
+    let err = rs::write_ticket(&w.f.env, &w.f.home, w.now + 1, &l, false).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+    assert!(err.to_string().contains("already pending"), "{err}");
+
+    // Another session is not held up.
+    let mut other = l.clone();
+    other.entry.session_id = B.into();
+    assert!(rs::write_ticket(&w.f.env, &w.f.home, w.now + 2, &other, false).is_ok());
+
+    // Once the first terminal has taken its ticket, the session may be
+    // launched again (it is then judged by the open checks).
+    w.f.platform
+        .push_run_result(Ok(ExitInfo::exited(900, 0, 1)));
+    run_ticket(&w, &key);
+    assert!(rs::write_ticket(&w.f.env, &w.f.home, w.now + 3, &l, false).is_ok());
+}
+
+#[test]
+fn a_pending_mark_lapses_with_its_ticket() {
+    let mut w = World::new();
+    let l = launch_of(&mut w, &[]);
+    rs::write_ticket(&w.f.env, &w.f.home, w.now, &l, false).unwrap();
+    let mark = std::fs::read_dir(paths::resurrect_dir(&w.f.env, &w.f.home))
+        .unwrap()
+        .flatten()
+        .find(|e| e.file_name().to_string_lossy().starts_with("pending-"))
+        .expect("a pending mark")
+        .path();
+    let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    std::fs::File::options()
+        .write(true)
+        .open(&mark)
+        .unwrap()
+        .set_modified(long_ago)
+        .unwrap();
+    assert!(rs::write_ticket(&w.f.env, &w.f.home, w.now + 1, &l, false).is_ok());
+}
+
+#[test]
+fn the_new_terminal_checks_again_that_the_session_is_not_running() {
+    // A Running record on a live terminal.
+    let mut w = World::new();
+    let l = launch_of(&mut w, &[]);
+    let key = rs::write_ticket(&w.f.env, &w.f.home, w.now, &l, false).unwrap();
+    let mut rec = Record::new(
+        AgentKind::Claude,
+        A,
+        w.cwd(),
+        agent_bin(AgentKind::Claude),
+        "b",
+    );
+    rec.state = State::Running;
+    w.f.core.insert(terminal_with("t9", Some(&rec), None));
+    let (_, said) = run_ticket(&w, &key);
+    assert!(said[0].contains("running now"), "{said:?}");
+    assert!(w.f.platform.runs().is_empty());
+
+    // A live Claude session file.
+    let mut w = World::new();
+    let l = launch_of(&mut w, &[]);
+    let key = rs::write_ticket(&w.f.env, &w.f.home, w.now, &l, false).unwrap();
+    let dir = w.f.home.join(".claude/sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("77.json"),
+        json!({"pid": 77, "sessionId": A}).to_string(),
+    )
+    .unwrap();
+    w.f.platform
+        .add_process(ProcInfo::new(77, 1, 1, vec!["claude".into()]));
+    let (_, said) = run_ticket(&w, &key);
+    assert!(said[0].contains("running now"), "{said:?}");
+    assert!(w.f.platform.runs().is_empty());
+
+    // A session file written a moment ago.
+    let mut w = World::new();
+    let l = launch_of(&mut w, &[]);
+    let key = rs::write_ticket(&w.f.env, &w.f.home, w.now, &l, false).unwrap();
+    w.age(&w.claude_file(A), 10_000);
+    let (_, said) = run_ticket(&w, &key);
+    assert!(said[0].contains("running now"), "{said:?}");
+    assert!(w.f.platform.runs().is_empty());
+}
+
+#[test]
+fn a_fork_ticket_runs_even_though_the_session_is_open() {
+    let mut w = World::new();
+    let r = ready(&mut w, &[]);
+    let l = rs::prepare(&r, &mut w.f.ctx(), true).unwrap();
+    let key = rs::write_ticket(&w.f.env, &w.f.home, w.now, &l, true).unwrap();
+    w.age(&w.claude_file(A), 10_000);
+    w.f.platform
+        .push_run_result(Ok(ExitInfo::exited(900, 0, 1)));
+    let (_, said) = run_ticket(&w, &key);
+    assert!(said.is_empty(), "{said:?}");
+    assert_eq!(
+        w.f.platform.runs()[0].argv.last().map(String::as_str),
+        Some("--fork-session")
+    );
 }

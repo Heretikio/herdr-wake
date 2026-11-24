@@ -1049,8 +1049,13 @@ fn resurrect(a: ResurrectArgs) -> anyhow::Result<i32> {
              start it). Start Herdr or herdr-core, or use --print for the command."
         );
     }
-    let key = rs::write_ticket(&s.env, &s.home, now, &launch, a.fork)
-        .context("writing the launch ticket")?;
+    let key = rs::write_ticket(&s.env, &s.home, now, &launch, a.fork).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            anyhow!(e)
+        } else {
+            anyhow!(e).context("writing the launch ticket")
+        }
+    })?;
     let exe = std::env::current_exe().context("finding this herdr-wake binary")?;
     let opened = rs::open_terminal(&tools, &mut core, &s.env, &s.home, &launch.cwd, &exe, &key)
         .map_err(|e| anyhow!(e))?;
