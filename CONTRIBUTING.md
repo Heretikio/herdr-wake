@@ -63,6 +63,8 @@ When you test by hand, keep your real sessions out of it: run `hc` only against 
 | `src/wake.rs`, `src/gate.rs` | Resume flow: what `herdr-wake shell` does, and the staggered start |
 | `src/boot.rs` | `herdr-wake boot`: start core, wait for resumes, write the summary |
 | `src/record.rs` | The record stored as a label on each terminal |
+| `src/history.rs` | The history journal: one private file per session, kept after it ends |
+| `src/transcripts.rs`, `src/resurrect.rs` | `herdr-wake resurrect`: reading Claude Code and Codex transcripts, the list, the checks and the new terminal |
 | `src/core/` | The herdr-core socket client (`SocketCore`) and a fake for tests (`FakeCore`) |
 | `src/agents/` | One adapter per agent |
 | `src/platform/` | One adapter per OS, plus a fake |
