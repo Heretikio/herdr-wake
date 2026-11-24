@@ -509,3 +509,47 @@ fn meta_of_reads_one_file_and_ignores_pi_and_opencode() {
     );
     let _: BTreeMap<String, String> = BTreeMap::new();
 }
+
+#[test]
+fn a_title_that_looks_like_a_credential_is_hidden_here_and_in_the_cache() {
+    let c = tempfile::tempdir().unwrap();
+    let f = claude_file(c.path(), "p", ID);
+    write_lines(
+        &f,
+        &[
+            user("use this API token abc123 for the deploy"),
+            json!({"type":"ai-title","aiTitle":"Deploy with bearer credentials"}),
+        ],
+    );
+    let state = tempfile::tempdir().unwrap();
+    let cache_file = state.path().join("transcripts.json");
+    let mut cache = Cache::load(&cache_file);
+    let found = transcripts::scan_claude(c.path(), &mut cache);
+    cache.save(&cache_file).unwrap();
+
+    let m = &found[0].meta;
+    assert_eq!(m.prompt.as_deref(), Some(transcripts::HIDDEN_TITLE));
+    assert_eq!(m.title(), Some(transcripts::HIDDEN_TITLE));
+    let cached = std::fs::read_to_string(&cache_file).unwrap();
+    for leak in ["abc123", "API token", "bearer"] {
+        assert!(!cached.contains(leak), "{leak} in the cache");
+    }
+    assert_eq!(transcripts::CACHE_VERSION, 2);
+
+    // Codex names go the same way.
+    let h = tempfile::tempdir().unwrap();
+    std::fs::write(
+        h.path().join("session_index.jsonl"),
+        format!(
+            "{}\n",
+            json!({"id": ID, "thread_name": "rotate the secret key"})
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        transcripts::codex_names(h.path())
+            .get(ID)
+            .map(String::as_str),
+        Some(transcripts::HIDDEN_TITLE)
+    );
+}

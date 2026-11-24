@@ -5,6 +5,7 @@
 mod common;
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -1596,4 +1597,165 @@ fn a_fork_ticket_runs_even_though_the_session_is_open() {
         w.f.platform.runs()[0].argv.last().map(String::as_str),
         Some("--fork-session")
     );
+}
+
+// ------------------------------------------- what is shown, what is refused
+
+fn words(v: &[&str]) -> Vec<String> {
+    v.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn flags_are_shown_by_name_except_a_few_enumerated_values() {
+    let shown = rs::display_words(
+        &words(&[
+            "--model",
+            "opus",
+            "--append-system-prompt",
+            "never tell anyone hunter2",
+            "--add-dir",
+            "/secret/place",
+            "--permission-mode",
+            "plan",
+            "--dangerously-skip-permissions",
+            "--mcp-config=./mcp.json",
+            "--sandbox=read-only",
+            "-sdanger-full-access",
+            "-a",
+            "never",
+            "-c",
+            "model_provider=x",
+            "-uhunter2",
+        ]),
+        &[],
+    );
+    assert_eq!(
+        shown,
+        words(&[
+            "--model",
+            "opus",
+            "--append-system-prompt",
+            "--add-dir",
+            "--permission-mode",
+            "plan",
+            "--dangerously-skip-permissions",
+            "--mcp-config",
+            "--sandbox=read-only",
+            "-sdanger-full-access",
+            "-a",
+            "never",
+            "-c",
+            "-u",
+        ])
+    );
+    let joined = shown.join(" ");
+    for secret in [
+        "hunter2",
+        "secret/place",
+        "mcp.json",
+        "model_provider",
+        "never tell",
+    ] {
+        assert!(!joined.contains(secret), "{secret} shown in {joined}");
+    }
+}
+
+#[test]
+fn the_json_listing_shows_flag_names_only() {
+    let mut w = World::new();
+    w.journal(
+        AgentKind::Claude,
+        A,
+        &[
+            "--append-system-prompt",
+            "hunter2 is the password",
+            "--model",
+            "opus",
+        ],
+        HOUR,
+        Ending::Quit,
+    );
+    let rows = w.rows();
+    let (shown, _) = rs::select(&rows, &Filter::default(), 20);
+    let j = rs::list_json(&shown, w.now);
+    assert_eq!(
+        j["sessions"][0]["flags"],
+        json!(["--append-system-prompt", "--model", "opus"])
+    );
+    assert!(!j.to_string().contains("hunter2"));
+    let table = rs::render_list(&shown, 1, w.now, &w.f.home, false);
+    assert!(!table.contains("hunter2"));
+}
+
+#[test]
+fn the_shown_command_hides_values_and_the_printed_one_keeps_them() {
+    let mut w = World::new();
+    let l = launch_of(
+        &mut w,
+        &["--model", "opus", "--append-system-prompt", "hunter2 words"],
+    );
+    let exact = l.command(&w.f.env);
+    assert!(exact.contains("'hunter2 words'"), "{exact}");
+    let shown = l.display_command(&w.f.env);
+    assert!(!shown.contains("hunter2"), "{shown}");
+    assert!(
+        shown.contains("--append-system-prompt --model opus")
+            || shown.contains("--model opus --append-system-prompt"),
+        "{shown}"
+    );
+    assert!(shown.ends_with(&format!("--resume {A}")), "{shown}");
+}
+
+#[test]
+fn the_command_is_built_from_parts_so_a_folder_cannot_confuse_it() {
+    let launch = rs::Launch {
+        entry: history::Entry::from_record(
+            None,
+            &Record::new(AgentKind::Claude, A, "/x".into(), "/bin/claude".into(), "b"),
+            1,
+        ),
+        argv: words(&["/bin/claude", "--model", "it's", "--resume", A]),
+        env: [("CLAUDE_CONFIG_DIR".to_string(), "/c c && d".to_string())]
+            .into_iter()
+            .collect(),
+        cwd: PathBuf::from("/tmp/a && b/it's"),
+        before: Vec::new(),
+    };
+    assert_eq!(
+        launch.command(&BTreeMap::new()),
+        format!(
+            "cd '/tmp/a && b/it'\\''s' && CLAUDE_CONFIG_DIR='/c c && d' /bin/claude --model 'it'\\''s' --resume {A}"
+        )
+    );
+    // The shell's own value is not repeated.
+    let current: BTreeMap<_, _> = [("CLAUDE_CONFIG_DIR".to_string(), "/c c && d".to_string())]
+        .into_iter()
+        .collect();
+    assert!(!launch.command(&current).contains("CLAUDE_CONFIG_DIR"));
+}
+
+#[test]
+fn a_command_that_cannot_be_shown_safely_is_refused() {
+    // Control characters in a flag.
+    let mut w = World::new();
+    let r = ready(&mut w, &["--model", "op\u{1b}[31mus"]);
+    let err = rs::prepare(&r, &mut w.f.ctx(), false).unwrap_err();
+    assert!(err.contains("control or direction-changing"), "{err}");
+
+    // A direction-changing character in the folder.
+    let mut w = World::new();
+    let mut r = ready(&mut w, &[]);
+    let odd = w.f.home.join("proj\u{202e}txt");
+    std::fs::create_dir(&odd).unwrap();
+    r.entry.cwd = odd;
+    let err = rs::prepare(&r, &mut w.f.ctx(), false).unwrap_err();
+    assert!(err.contains("control or direction-changing"), "{err}");
+
+    // A line break in the folder name.
+    let mut w = World::new();
+    let mut r = ready(&mut w, &[]);
+    let odd = w.f.home.join("proj\nrm");
+    std::fs::create_dir(&odd).unwrap();
+    r.entry.cwd = odd;
+    assert!(rs::prepare(&r, &mut w.f.ctx(), false).is_err());
 }

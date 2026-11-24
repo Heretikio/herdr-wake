@@ -268,7 +268,17 @@ pub fn shell_quote(s: &str) -> String {
 
 /// `cd <cwd> && <argv...>`, every word quoted.
 pub(crate) fn manual_command(cwd: &Path, argv: &[String]) -> String {
-    let words: Vec<String> = argv.iter().map(|a| shell_quote(a)).collect();
+    command_line(cwd, &[], argv)
+}
+
+/// `cd <cwd> && [NAME=value ...] <argv...>`, built from its parts, every
+/// word and value quoted.
+pub(crate) fn command_line(cwd: &Path, vars: &[(&str, &str)], argv: &[String]) -> String {
+    let mut words: Vec<String> = vars
+        .iter()
+        .map(|(name, value)| format!("{name}={}", shell_quote(value)))
+        .collect();
+    words.extend(argv.iter().map(|a| shell_quote(a)));
     format!(
         "cd {} && {}",
         shell_quote(&cwd.to_string_lossy()),

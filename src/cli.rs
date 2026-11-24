@@ -336,7 +336,8 @@ pub fn main() -> i32 {
     match result {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("herdr-wake: {e:#}");
+            // An error can quote text from a file or a terminal label.
+            eprintln!("herdr-wake: {}", trust::printable(&format!("{e:#}")));
             1
         }
     }
@@ -1078,7 +1079,10 @@ fn resurrect(a: ResurrectArgs) -> anyhow::Result<i32> {
         format!("terminal {}", opened.terminal)
     };
     println!("Opened {terminal} for the {what}.");
-    println!("It runs: {}", trust::printable(&command));
+    println!(
+        "It runs: {} (flag values are not shown, except modes and the model)",
+        trust::printable(&launch.display_command(&s.env))
+    );
     match &opened.space {
         Some(space) => println!("It is in Herdr space {space}."),
         None => println!(

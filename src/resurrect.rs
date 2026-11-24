@@ -688,7 +688,7 @@ pub fn list_json(rows: &[&Row], now_ms: u64) -> serde_json::Value {
                 "ending": r.ending().as_str(),
                 "last_ms": r.last_ms,
                 "age": age(now_ms, r.last_ms),
-                "flags": r.entry.flags,
+                "flags": display_words(&r.entry.flags, &[]),
                 "bypass": r.bypass,
                 "flags_from_transcript": r.flags_from_transcript,
                 "source": r.source.as_str(),
@@ -861,22 +861,88 @@ const FOLDER_VARS: &[&str] = &[
     "OPENCODE_DB",
 ];
 
+/// The values of these flags may be shown: they name a fixed set of modes
+/// or a model, not something a person typed in free form.
+const SHOWN_VALUES: &[&str] = &[
+    "--permission-mode",
+    "--model",
+    "-s",
+    "--sandbox",
+    "-a",
+    "--ask-for-approval",
+];
+
+/// `words` (flags, with their values and perhaps positional words) as they
+/// may be shown: flag names only, except the values of `SHOWN_VALUES`. A
+/// word that is not a flag or the value of one of those is left out unless
+/// it is in `keep` (a subcommand, the session id).
+pub fn display_words(words: &[String], keep: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut value_next = false;
+    for w in words {
+        if std::mem::take(&mut value_next) && !w.starts_with('-') {
+            out.push(w.clone());
+            continue;
+        }
+        if let Some(long) = w.strip_prefix("--") {
+            match long.split_once('=') {
+                Some((name, _)) if SHOWN_VALUES.contains(&format!("--{name}").as_str()) => {
+                    out.push(w.clone());
+                }
+                Some((name, _)) => out.push(format!("--{name}")),
+                None => {
+                    value_next = SHOWN_VALUES.contains(&w.as_str());
+                    out.push(w.clone());
+                }
+            }
+        } else if w.starts_with('-') && w.len() > 1 {
+            let name: String = w.chars().take(2).collect();
+            if w.chars().count() > 2 {
+                // A short flag with its value attached.
+                out.push(if SHOWN_VALUES.contains(&name.as_str()) {
+                    w.clone()
+                } else {
+                    name
+                });
+            } else {
+                value_next = SHOWN_VALUES.contains(&w.as_str());
+                out.push(w.clone());
+            }
+        } else if keep.contains(&w.as_str()) {
+            out.push(w.clone());
+        }
+    }
+    out
+}
+
 impl Launch {
-    /// `cd <folder> && [VAR=value ...] <command>`, shell-quoted. Agent
-    /// folder variables are included only when they differ from `current`.
-    pub fn command(&self, current: &BTreeMap<String, String>) -> String {
-        let vars: Vec<String> = FOLDER_VARS
+    /// The agent-folder variables the command must carry: the ones that
+    /// differ from `current`, the caller's own environment.
+    fn vars<'a>(&'a self, current: &BTreeMap<String, String>) -> Vec<(&'static str, &'a str)> {
+        FOLDER_VARS
             .iter()
             .filter_map(|k| {
                 let v = self.env.get(*k)?;
-                (current.get(*k) != Some(v)).then(|| format!("{k}={}", wake::shell_quote(v)))
+                (current.get(*k) != Some(v)).then_some((*k, v.as_str()))
             })
-            .collect();
-        let plain = wake::manual_command(&self.cwd, &self.argv);
-        match plain.split_once(" && ") {
-            Some((cd, cmd)) if !vars.is_empty() => format!("{cd} && {} {cmd}", vars.join(" ")),
-            _ => plain,
-        }
+            .collect()
+    }
+
+    /// `cd <folder> && [VAR=value ...] <command>`, shell-quoted, built from
+    /// its parts. Agent folder variables are included only when they differ
+    /// from `current`. This is the exact command, flag values included: for
+    /// `--print` and the retry line, where it has to run.
+    pub fn command(&self, current: &BTreeMap<String, String>) -> String {
+        wake::command_line(&self.cwd, &self.vars(current), &self.argv)
+    }
+
+    /// The same command for showing: flag names only, except the values in
+    /// `SHOWN_VALUES` (see `display_words`).
+    pub fn display_command(&self, current: &BTreeMap<String, String>) -> String {
+        let mut argv: Vec<String> = self.argv.first().cloned().into_iter().collect();
+        let keep = [self.entry.session_id.as_str(), "resume"];
+        argv.extend(display_words(self.argv.get(1..).unwrap_or_default(), &keep));
+        wake::command_line(&self.cwd, &self.vars(current), &argv)
     }
 }
 
@@ -931,13 +997,23 @@ pub fn prepare(row: &Row, ctx: &mut Ctx, fork: bool) -> Result<Launch, String> {
             if fork {
                 argv.push("--fork-session".to_string());
             }
-            Ok(Launch {
+            let launch = Launch {
                 entry,
                 argv,
                 env,
                 cwd,
                 before,
-            })
+            };
+            // What cannot be shown as it is cannot be checked by eye, so
+            // it is neither printed nor run.
+            let command = launch.command(ctx.env);
+            if trust::printable(&command) != command {
+                return Err(
+                    "cannot bring it back: its folder or a flag holds control or direction-changing characters, so the command cannot be shown safely"
+                        .to_string(),
+                );
+            }
+            Ok(launch)
         }
         Decision::GiveUp { reason, .. } => Err(format!("cannot bring it back: {reason}")),
         _ => Err("cannot bring it back".to_string()),

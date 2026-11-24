@@ -356,3 +356,16 @@ fn resurrect_run_with_no_ticket_says_why_and_ends_in_a_shell() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("cannot bring the session back"), "{err}");
 }
+
+#[test]
+fn error_text_never_carries_control_characters_to_the_terminal() {
+    let home = tempfile::tempdir().unwrap();
+    let out = resurrect(home.path(), &["--agent", "\u{1b}]0;owned\u{7}x\u{202e}y"]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("unknown agent"), "{err}");
+    assert!(
+        !err.contains('\u{1b}') && !err.contains('\u{7}') && !err.contains('\u{202e}'),
+        "{err:?}"
+    );
+}
