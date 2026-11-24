@@ -1840,3 +1840,299 @@ fn a_failing_hc_reports_its_first_error_line_and_a_slow_one_is_stopped() {
     assert_eq!(tools.herdr_app_ls(), None);
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
 }
+
+// ------------------------------------------------------ the run lock
+
+use herdr_wake::platform::{BootService, Platform as PlatformTrait};
+use herdr_wake::record::ProcRef;
+use std::sync::mpsc;
+use std::sync::Mutex;
+
+/// A platform whose `run_foreground` takes as long as the test wants: it
+/// says it has started, then waits to be let go. Everything else is the
+/// fake's.
+struct SlowAgent {
+    inner: FakePlatform,
+    started: Mutex<mpsc::Sender<()>>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl PlatformTrait for SlowAgent {
+    fn process(&self, pid: u32) -> Option<ProcInfo> {
+        self.inner.process(pid)
+    }
+    fn alive(&self, p: &ProcRef) -> bool {
+        self.inner.alive(p)
+    }
+    fn boot_id(&self) -> String {
+        self.inner.boot_id()
+    }
+    fn login_shell_argv(&self, shell: &Path) -> Vec<String> {
+        self.inner.login_shell_argv(shell)
+    }
+    fn exec(&self, argv: &[String], env: &BTreeMap<String, String>, cwd: &Path) -> std::io::Error {
+        self.inner.exec(argv, env, cwd)
+    }
+    fn run_foreground(
+        &self,
+        argv: &[String],
+        env: &BTreeMap<String, String>,
+        cwd: &Path,
+    ) -> std::io::Result<ExitInfo> {
+        let r = self.inner.run_foreground(argv, env, cwd);
+        self.started.lock().unwrap().send(()).unwrap();
+        // The agent runs, and has not registered itself anywhere yet.
+        self.release.lock().unwrap().recv().unwrap();
+        r
+    }
+    fn shutting_down(&self) -> bool {
+        self.inner.shutting_down()
+    }
+    fn core_pid(&self) -> Option<u32> {
+        self.inner.core_pid()
+    }
+    fn boot_service(&self) -> &dyn BootService {
+        self.inner.boot_service()
+    }
+    fn now_ms(&self) -> u64 {
+        self.inner.now_ms()
+    }
+    fn mono_ms(&self) -> u64 {
+        self.inner.mono_ms()
+    }
+}
+
+fn locks(w: &World) -> Vec<String> {
+    std::fs::read_dir(paths::resurrect_dir(&w.f.env, &w.f.home))
+        .map(|d| {
+            d.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.starts_with("running-"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// This test process, as the fake platform's process table shows it.
+fn register_self(w: &World, start: u64) {
+    w.f.platform.add_process(ProcInfo::new(
+        std::process::id(),
+        1,
+        start,
+        vec!["herdr-wake".into()],
+    ));
+}
+
+fn lock_text(agent: &str, id: &str, pid: u32, start: u64) -> String {
+    json!({"agent": agent, "id": id, "pid": pid, "start": start}).to_string()
+}
+
+fn write_lock(w: &World, text: &str) {
+    let dir = paths::resurrect_dir(&w.f.env, &w.f.home);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("running-claude-{A}")), text).unwrap();
+}
+
+#[test]
+fn a_second_launch_back_to_back_is_refused_while_the_agent_has_not_registered() {
+    let mut w = World::new();
+    let first = launch_of(&mut w, &[]);
+    register_self(&w, 7);
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let slow = SlowAgent {
+        inner: FakePlatform::new(),
+        started: Mutex::new(started_tx),
+        release: Mutex::new(release_rx),
+    };
+    slow.inner.set_now(w.now);
+    slow.inner.add_process(ProcInfo::new(
+        std::process::id(),
+        1,
+        7,
+        vec!["herdr-wake".into()],
+    ));
+    let key = rs::write_ticket(&w.f.env, &w.f.home, w.now, &first, false).unwrap();
+
+    let env = {
+        let mut e = w.f.env.clone();
+        e.insert("SHELL".into(), "/bin/zsh".into());
+        e
+    };
+    std::thread::scope(|scope| {
+        let (slow_ref, home, key, mut core, env_ref) =
+            (&slow, w.f.home.clone(), key.clone(), w.f.core.clone(), &env);
+        let run = scope.spawn(move || {
+            rs::run_ticket(
+                slow_ref,
+                env_ref,
+                &home,
+                &key,
+                &mut core,
+                &FakeTools::ok(""),
+                &|_| {},
+            );
+        });
+        // The first agent is up, but wrote no session file, has no record
+        // and its transcript is as old as before.
+        started_rx.recv().unwrap();
+        assert_eq!(locks(&w).len(), 1, "the run lock is held while it runs");
+
+        // The listing sees it as running.
+        let rows = rs::collect(&mut w.f.ctx(), &FakeTools::ok("")).rows;
+        assert!(row(&rows, A).open, "the lock makes it open");
+        // A second `resurrect` is refused before it opens anything.
+        let err = rs::prepare(row(&rows, A), &mut w.f.ctx(), false).unwrap_err();
+        assert!(err.contains("running now"), "{err}");
+
+        // Even a second terminal that got its ticket anyway refuses.
+        let second = launch_of_row(&mut w, rows.iter().find(|r| r.id() == A).unwrap());
+        let key2 = rs::write_ticket(&w.f.env, &w.f.home, w.now + 1, &second, false).unwrap();
+        let said = RefCell::new(Vec::new());
+        let mut core = w.f.core.clone();
+        let mut env2 = env.clone();
+        env2.insert("X".into(), "1".into());
+        let plain = FakePlatform::new();
+        plain.set_now(w.now);
+        plain.add_process(ProcInfo::new(
+            std::process::id(),
+            1,
+            7,
+            vec!["herdr-wake".into()],
+        ));
+        rs::run_ticket(
+            &plain,
+            &env2,
+            &w.f.home,
+            &key2,
+            &mut core,
+            &FakeTools::ok(""),
+            &|s| said.borrow_mut().push(s.to_string()),
+        );
+        let said = said.into_inner();
+        assert!(
+            said[0].contains("running now") || said[0].contains("already being brought back"),
+            "{said:?}"
+        );
+        assert!(plain.runs().is_empty(), "the second agent never started");
+
+        release_tx.send(()).unwrap();
+        run.join().unwrap();
+    });
+    assert!(
+        locks(&w).is_empty(),
+        "the lock is gone when the agent exits"
+    );
+    assert_eq!(slow.inner.runs().len(), 1);
+}
+
+/// A launch made from a row that is flagged open (for a second ticket).
+fn launch_of_row(w: &mut World, row: &rs::Row) -> rs::Launch {
+    let mut r = row.clone();
+    r.open = false;
+    rs::prepare(&r, &mut w.f.ctx(), false).unwrap()
+}
+
+#[test]
+fn the_run_lock_itself_refuses_a_second_run_when_the_open_checks_see_nothing() {
+    // The lock is held by a live process, nothing else shows the session.
+    let mut w = World::new();
+    let l = launch_of(&mut w, &[]);
+    w.f.platform
+        .add_process(ProcInfo::new(555, 1, 9, vec!["herdr-wake".into()]));
+    write_lock(&w, &lock_text("claude", A, 555, 9));
+    let key = rs::write_ticket(&w.f.env, &w.f.home, w.now, &l, false).unwrap();
+    // `is_open_now` sees the live lock too: either line refuses.
+    let (_, said) = run_ticket(&w, &key);
+    assert!(said[0].contains("running now"), "{said:?}");
+    assert!(w.f.platform.runs().is_empty());
+    assert_eq!(locks(&w).len(), 1, "someone else's lock is left alone");
+}
+
+#[test]
+fn a_lock_left_by_a_crash_does_not_block_and_is_replaced() {
+    // Dead pid, a reused pid (other start), a lock nobody can read.
+    for text in [
+        lock_text("claude", A, 999_999, 5),
+        lock_text("claude", A, 555, 1),
+        "{not json".to_string(),
+    ] {
+        let mut w = World::new();
+        let l = launch_of(&mut w, &[]);
+        w.f.platform
+            .add_process(ProcInfo::new(555, 1, 9, vec!["something else".into()]));
+        write_lock(&w, &text);
+        register_self(&w, 7);
+        let key = rs::write_ticket(&w.f.env, &w.f.home, w.now, &l, false).unwrap();
+        w.f.platform
+            .push_run_result(Ok(ExitInfo::exited(900, 0, 1)));
+
+        let (_, said) = run_ticket(&w, &key);
+
+        assert!(said.is_empty(), "{text}: {said:?}");
+        assert_eq!(w.f.platform.runs().len(), 1, "{text}");
+        assert!(locks(&w).is_empty(), "{text}: the lock is cleaned up");
+        // The listing does not take the stale lock for a running session.
+        assert!(!row(&w.rows(), A).open, "{text}");
+    }
+}
+
+#[test]
+fn a_lock_of_a_dead_run_is_not_open_and_a_live_one_is() {
+    let mut w = World::new();
+    w.journal(AgentKind::Claude, A, &[], HOUR, Ending::Quit);
+    write_lock(&w, &lock_text("claude", A, 999_999, 5));
+    assert!(!row(&w.rows(), A).open);
+    w.f.platform
+        .add_process(ProcInfo::new(999_999, 1, 5, vec!["herdr-wake".into()]));
+    assert!(row(&w.rows(), A).open);
+    // A pid that is alive but is another process now.
+    write_lock(&w, &lock_text("claude", A, 999_999, 6));
+    assert!(!row(&w.rows(), A).open);
+}
+
+#[test]
+fn the_lock_is_dropped_when_the_agent_cannot_start_and_a_fork_takes_none() {
+    let mut w = World::new();
+    let l = launch_of(&mut w, &[]);
+    register_self(&w, 7);
+    let key = rs::write_ticket(&w.f.env, &w.f.home, w.now, &l, false).unwrap();
+    // No scripted result: the agent cannot start.
+    run_ticket(&w, &key);
+    assert!(locks(&w).is_empty());
+
+    // A fork does not lock the session it copies.
+    let mut w = World::new();
+    let r = ready(&mut w, &[]);
+    let l = rs::prepare(&r, &mut w.f.ctx(), true).unwrap();
+    let key = rs::write_ticket(&w.f.env, &w.f.home, w.now, &l, true).unwrap();
+    write_lock(&w, &lock_text("claude", A, 999_999, 5)); // stale, ignored
+    w.age(&w.claude_file(A), 10_000); // fresh file: open, fork allowed
+    w.f.platform
+        .push_run_result(Ok(ExitInfo::exited(900, 0, 1)));
+    let (_, said) = run_ticket(&w, &key);
+    assert!(said.is_empty(), "{said:?}");
+    assert_eq!(w.f.platform.runs().len(), 1);
+}
+
+#[test]
+fn the_pending_mark_stays_until_the_run_lock_exists() {
+    let mut w = World::new();
+    let l = launch_of(&mut w, &[]);
+    register_self(&w, 7);
+    let key = rs::write_ticket(&w.f.env, &w.f.home, w.now, &l, false).unwrap();
+    let dir = paths::resurrect_dir(&w.f.env, &w.f.home);
+    let pending = || {
+        std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with("pending-"))
+    };
+    assert!(pending());
+    w.f.platform
+        .push_run_result(Ok(ExitInfo::exited(900, 0, 1)));
+    run_ticket(&w, &key);
+    assert!(!pending(), "gone once the run is over");
+    // While the run lock is held the pending mark is already gone, and the
+    // lock stands in: the back-to-back test above covers that gap.
+}

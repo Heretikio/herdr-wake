@@ -369,3 +369,52 @@ fn error_text_never_carries_control_characters_to_the_terminal() {
         "{err:?}"
     );
 }
+
+#[test]
+fn resurrect_refusals_exit_one() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let bindir = home.path().join("bin");
+    std::fs::create_dir_all(&bindir).unwrap();
+    let claude = bindir.join("claude");
+    std::fs::write(&claude, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let id = "0b5a2c1e-1111-4222-8333-444455556666";
+    let projects = home
+        .path()
+        .join(".claude/projects")
+        .join(herdr_wake::agents::claude::project_dir_name(work.path()));
+    std::fs::create_dir_all(&projects).unwrap();
+    // A session file written just now: the session counts as running.
+    std::fs::write(
+        projects.join(format!("{id}.jsonl")),
+        serde_json::json!({"type":"user","cwd":work.path(),"message":{"role":"user","content":"hi"}})
+            .to_string()
+            + "\n",
+    )
+    .unwrap();
+    let mut rec = herdr_wake::record::Record::new(
+        herdr_wake::record::AgentKind::Claude,
+        id,
+        work.path().to_path_buf(),
+        claude,
+        "b",
+    );
+    rec.flags = Vec::new();
+    let dir = home.path().join(".local/state/herdr-wake/history");
+    herdr_wake::history::started(&dir, 500, &"t1".into(), &rec, 1000).unwrap();
+
+    for args in [&["resurrect", "--print", id][..], &["resurrect", id][..]] {
+        let out = bin()
+            .args(args)
+            .env("HOME", home.path())
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("running now"), "{err}");
+        assert!(out.stdout.is_empty());
+    }
+}

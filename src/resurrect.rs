@@ -207,6 +207,9 @@ struct ClaudeSession {
 /// files a running Codex has open.
 pub fn open_sessions(ctx: &mut Ctx, tools: &dyn Tools, claude_dirs: &BTreeSet<PathBuf>) -> OpenSet {
     let mut open = OpenSet::default();
+    for lock in live_run_locks(ctx.platform, ctx.env, ctx.home) {
+        open.ids.insert((lock.agent, lock.id));
+    }
     for file in tools.codex_open_files() {
         if let Some(id) = file
             .file_name()
@@ -1162,12 +1165,8 @@ fn take_ticket(
     let _ = std::fs::remove_file(&claimed);
     let ticket: Ticket = serde_json::from_slice(&read?)
         .map_err(|_| "the launch ticket cannot be read".to_string())?;
-    // The ticket is ours now: the launch is under way, so the pending mark
-    // goes (if it is still this ticket's).
-    let pending = pending_file(env, home, ticket.entry.agent, &ticket.entry.session_id);
-    if std::fs::read_to_string(&pending).is_ok_and(|k| k == key) {
-        let _ = std::fs::remove_file(&pending);
-    }
+    // The pending mark stays: it goes once the run lock exists (see
+    // `release_pending`), so there is no gap between the two.
     if ticket.v != TICKET_VERSION {
         return Err("the launch ticket is from another version".to_string());
     }
@@ -1175,6 +1174,138 @@ fn take_ticket(
         return Err("the launch ticket is out of date".to_string());
     }
     Ok(ticket)
+}
+
+/// Removes the pending mark of the launch `key` of this session, if it is
+/// still that launch's.
+fn release_pending(
+    env: &BTreeMap<String, String>,
+    home: &Path,
+    agent: AgentKind,
+    id: &str,
+    key: &str,
+) {
+    let pending = pending_file(env, home, agent, id);
+    if std::fs::read_to_string(&pending).is_ok_and(|k| k == key) {
+        let _ = std::fs::remove_file(&pending);
+    }
+}
+
+// ----------------------------------------------------------- the run lock
+
+/// What `running-<agent>-<id>` holds: who runs the session.
+#[derive(Serialize, Deserialize)]
+struct RunLock {
+    agent: AgentKind,
+    id: String,
+    pid: u32,
+    /// The process's start stamp (`ProcInfo::start`), so a reused pid is
+    /// not mistaken for the run; 0 when it could not be read.
+    start: u64,
+}
+
+fn run_lock_file(
+    env: &BTreeMap<String, String>,
+    home: &Path,
+    agent: AgentKind,
+    id: &str,
+) -> PathBuf {
+    paths::resurrect_dir(env, home).join(format!("running-{agent}-{}", record::plain_name(id)))
+}
+
+fn read_run_lock(path: &Path) -> Option<RunLock> {
+    let md = std::fs::symlink_metadata(path).ok()?;
+    if !md.is_file() || md.len() > 4096 {
+        return None;
+    }
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+/// True when the process of `lock` is running: its pid exists and, when the
+/// lock recorded a start stamp, has that start.
+fn run_lock_is_live(platform: &dyn Platform, lock: &RunLock) -> bool {
+    platform
+        .process(lock.pid)
+        .is_some_and(|p| lock.start == 0 || p.start == lock.start)
+}
+
+/// The run locks whose process is running.
+fn live_run_locks(
+    platform: &dyn Platform,
+    env: &BTreeMap<String, String>,
+    home: &Path,
+) -> Vec<RunLock> {
+    let Ok(files) = std::fs::read_dir(paths::resurrect_dir(env, home)) else {
+        return Vec::new();
+    };
+    files
+        .flatten()
+        .filter(|f| f.file_name().to_string_lossy().starts_with("running-"))
+        .filter_map(|f| read_run_lock(&f.path()))
+        .filter(|l| run_lock_is_live(platform, l))
+        .collect()
+}
+
+/// A held run lock; the file goes when this is dropped.
+struct RunGuard {
+    path: PathBuf,
+    pid: u32,
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        // Only our own file: a lock that someone replaced after a crash
+        // belongs to them.
+        if read_run_lock(&self.path).is_some_and(|l| l.pid == self.pid) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Takes the run lock of the session for this process, exclusively, before
+/// the agent starts. `Err` says who holds it. A lock whose process is gone
+/// (or whose pid now belongs to another process) is stale: it is renamed
+/// away, which only one of several racing processes can do, and replaced.
+fn acquire_run_lock(
+    platform: &dyn Platform,
+    env: &BTreeMap<String, String>,
+    home: &Path,
+    agent: AgentKind,
+    id: &str,
+) -> Result<RunGuard, String> {
+    static STALE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let path = run_lock_file(env, home, agent, id);
+    let pid = std::process::id();
+    let start = platform.process(pid).map_or(0, |p| p.start);
+    let body = serde_json::to_vec(&RunLock {
+        agent,
+        id: id.to_string(),
+        pid,
+        start,
+    })
+    .map_err(|e| e.to_string())?;
+    for _ in 0..2 {
+        match crate::private::create_new(&path, &body) {
+            Ok(()) => return Ok(RunGuard { path, pid }),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if let Some(held) = read_run_lock(&path).filter(|l| run_lock_is_live(platform, l)) {
+                    return Err(format!(
+                        "it is already being brought back by another herdr-wake (process {})",
+                        held.pid
+                    ));
+                }
+                let away = path.with_file_name(format!(
+                    "stale-{pid}-{}",
+                    STALE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                ));
+                if std::fs::rename(&path, &away).is_ok() {
+                    let _ = std::fs::remove_file(&away);
+                }
+            }
+            Err(e) => return Err(format!("cannot take the run lock: {e}")),
+        }
+    }
+    Err("another herdr-wake is taking the run lock of that session".to_string())
 }
 
 // ------------------------------------------------- the new terminal's side
@@ -1234,30 +1365,55 @@ pub fn run_ticket(
         row.open = is_open_now(&mut ctx, tools, &row.entry);
         prepare(&row, &mut ctx, ticket.fork)
     };
+    let (agent, id) = (row.entry.agent, row.entry.session_id.clone());
     match launch {
         Err(why) => {
             let rec = row.entry.to_record();
             say(&wake::give_up_line(&rec, &why, None));
         }
         Ok(launch) => {
-            let mut plan_env = launch.env.clone();
-            // The agent's own hook records it and the watcher notices when
-            // it is quit, as for any session a person starts.
-            plan_env.remove(wake::SUPERVISED_ENV);
-            let child_env = wake::launch_env(platform, env, &cfg, plan_env);
-            for cmd in &launch.before {
-                wake::run_before(cmd, &child_env, &launch.cwd);
-            }
-            if let Err(e) = platform.run_foreground(&launch.argv, &child_env, &launch.cwd) {
-                let rec = row.entry.to_record();
-                say(&wake::give_up_line(
-                    &rec,
-                    &format!("it could not start: {e}"),
-                    Some(&launch.command(env)),
-                ));
+            // One run per session: the lock exists before the agent starts
+            // and lasts as long as it runs, so a second launch in the gap
+            // before the agent registers itself finds it. A fork starts a
+            // session of its own and takes no lock.
+            let lock = if ticket.fork {
+                Ok(None)
+            } else {
+                acquire_run_lock(platform, env, home, agent, &id).map(Some)
+            };
+            // The lock (or the refusal) is the handover: the pending mark
+            // is no longer needed.
+            release_pending(env, home, agent, &id, key);
+            match lock {
+                Err(why) => {
+                    let rec = row.entry.to_record();
+                    say(&wake::give_up_line(&rec, &why, None));
+                }
+                Ok(lock) => {
+                    let mut plan_env = launch.env.clone();
+                    // The agent's own hook records it and the watcher notices
+                    // when it is quit, as for any session a person starts.
+                    plan_env.remove(wake::SUPERVISED_ENV);
+                    let child_env = wake::launch_env(platform, env, &cfg, plan_env);
+                    for cmd in &launch.before {
+                        wake::run_before(cmd, &child_env, &launch.cwd);
+                    }
+                    if let Err(e) = platform.run_foreground(&launch.argv, &child_env, &launch.cwd) {
+                        let rec = row.entry.to_record();
+                        say(&wake::give_up_line(
+                            &rec,
+                            &format!("it could not start: {e}"),
+                            Some(&launch.command(env)),
+                        ));
+                    }
+                    // Gone before the shell takes this process over.
+                    drop(lock);
+                }
             }
         }
     }
+    // Every way out of the launch ends the pending mark.
+    release_pending(env, home, agent, &id, key);
     wake::exec_shell(platform, env, home, &cfg, Some(&folder))
 }
 
