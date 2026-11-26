@@ -2,6 +2,15 @@
 
 Dated record of what has actually been run. Newest first. Anything not listed here has not been tested.
 
+## 2026-11-26: resurrect and the Sessions panel (herdr-wake 0.2.0)
+
+**Machine and versions:** an Apple silicon Mac (macOS 27.2), herdr-core 0.1.22, herdr-app 0.1.18, Claude Code 2.1.332, Codex CLI 0.169.0, herdr-wake at the 0.2.0 release commit.
+
+- `herdr-wake resurrect --json` listed 140 closed sessions on a machine that had used all four agents for weeks: 92 Claude Code, 26 OpenCode, 16 Pi and 6 Codex, mostly from the agents' own files (the journal was only days old).
+- The panel's Resume steps (`resurrect --id <ID> --space <SPACE> --ticket`, then the app's `tab.new` with the ticket's argv) brought back a real Claude Code session with its conversation in a new tab of that space. A second launch of the same session was refused with "that session is running now". Earlier, during development, two launches of one session started back to back were refused the same way.
+- The panel showed this computer's sessions, summaries and details. Other Herdr machines, which ran 0.1.2, appeared in the machine picker with the reason they gave no list.
+- Not run for this release: the reboot matrix (the hooks now also write the history journal), `resurrect` with real agents on Linux (the suites run there in CI), and resuming a session of another machine through the panel (covered by tests with a stand-in `hc` only).
+
 ## 2026-11-14: macOS reboot, real Codex 0.169 (herdr-wake 0.1.1)
 
 **Machine and versions:** the same Apple silicon Mac as below (macOS 27.2, FileVault off, auto-login off), herdr-core 0.1.18, Codex CLI 0.169.0 (Homebrew cask, signed in with ChatGPT), herdr-wake 0.1.1 built from commit f868179 plus the version bump.
