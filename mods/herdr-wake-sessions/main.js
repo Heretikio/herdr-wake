@@ -135,7 +135,7 @@ export default class WakeSessions extends View {
     });
   }
   // Summaries for the newest sessions of a machine (null: this computer), made in the background by
-  // its herdr-wake, so opening one shows it at once: the newest 20 here, 5 on another machine. Once
+  // its herdr-wake, so opening one shows it at once: the newest 60 here, 20 on another machine. Once
   // every ten minutes per machine; not at all when that herdr-wake has no such option.
   prefetch(machine, cx) {
     const key = machine ?? '';
