@@ -146,7 +146,7 @@ export function filterSessions(rows, query, where, repos = {}, pick = ALL_MACHIN
     : where.under !== undefined ? inside(s.cwd, where.under)
     : Boolean(normalizeFolder(where.folder)) && normalizeFolder(s.cwd) === normalizeFolder(where.folder));
   return rows.filter(s => machineMatches(s, pick) && inScope(s)
-    && `${s.title} ${s.cwd || ''} ${s.branch || ''} ${s.id} ${harnessName(s)} ${s.machine || ''}`.toLowerCase().includes(q));
+    && `${s.summary || ''} ${s.title} ${s.cwd || ''} ${s.branch || ''} ${s.id} ${harnessName(s)} ${s.machine || ''}`.toLowerCase().includes(q));
 }
 
 // A word for a shell command: quoted only when it has to be.
@@ -282,14 +282,22 @@ export function mergeRows(byMachine) {
 // A row's key in the list and in the launched set: the id, with the machine when it is not here (the
 // same id can be on two machines).
 export const rowKey = s => s.machine ? `${s.machine}/${s.id}` : s.id;
-// The picker's choices: all, this computer, and each machine that answered.
-export function machineOptions(answered) {
+// The picker's choices: all, this computer, and each machine Herdr knows; one that gave no list says
+// why after its name (`notes`: machine -> short reason).
+export function machineOptions(machines, notes = new Map()) {
   return [{ key: ALL_MACHINES, label: 'All machines' }, { key: THIS_COMPUTER, label: 'This computer' },
-    ...[...answered].sort().map(name => ({ key: name, label: name }))];
+    ...[...machines].sort().map(name => ({ key: name, label: notes.get(name) ? `${name} (${notes.get(name)})` : name }))];
 }
 // The picked machine if it is still a choice, else all.
-export const effectivePick = (pick, answered) =>
-  pick === THIS_COMPUTER || (typeof pick === 'string' && answered.includes(pick)) ? pick : ALL_MACHINES;
+export const effectivePick = (pick, machines) =>
+  pick === THIS_COMPUTER || (typeof pick === 'string' && machines.includes(pick)) ? pick : ALL_MACHINES;
+// What a row says first: the session's summary (its first sentence when that is enough), else its title.
+export function headline(s) {
+  const text = typeof s.summary === 'string' ? s.summary.trim().replace(/\s+/g, ' ') : '';
+  if (!text) return s.title || `${harnessName(s)} session`;
+  const first = /^(.{20,}?[.!?])\s/.exec(text);
+  return first ? first[1] : text;
+}
 // The home folder of a machine, guessed from where its sessions ran (/Users/x, /home/x, /root), so a
 // session at home reads "~". '' when nothing says.
 export function guessHome(cwds) {
@@ -302,7 +310,7 @@ export function guessHome(cwds) {
 }
 // How many of a machine's newest sessions get a background summary: all 20 here, 5 on a machine
 // that is not (each one costs that machine's Claude usage).
-export const prefetchCount = machine => machine ? 5 : 20;
+export const prefetchCount = machine => machine ? 20 : 60;
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 export function formatSessionTime(milliseconds) {

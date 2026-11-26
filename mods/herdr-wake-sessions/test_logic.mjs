@@ -147,6 +147,11 @@ assert.deepEqual(names(L.filterSessions(same, '', { under: '/proj', machine: 'bo
 assert.deepEqual(names(L.filterSessions(same, '', { under: '/proj' }, {})), ['here', 'box1']);
 // The picker's choices; a machine that stopped answering falls back to all.
 assert.deepEqual(L.machineOptions(['laptop', 'box1']).map(o => o.key), ['*', '', 'box1', 'laptop']);
+assert.equal(L.machineOptions(['box1'], new Map([['box1', 'offline']]))[2].label, 'box1 (offline)');
+assert.equal(L.headline({ title: 'fix it', summary: 'Fixed the panel row layout. Then more.' }), 'Fixed the panel row layout.');
+assert.equal(L.headline({ title: 'fix it', summary: 'Short. Then the rest of it' }), 'Short. Then the rest of it');
+assert.equal(L.headline({ title: 'fix it' }), 'fix it');
+assert.equal(L.headline({ title: '', program: 'codex' }), 'Codex session');
 assert.equal(L.effectivePick('box1', ['box1']), 'box1');
 assert.equal(L.effectivePick('box1', []), '*');
 assert.equal(L.effectivePick('', []), '');
@@ -182,8 +187,8 @@ assert.deepEqual(L.remoteResult('box1', { code: 3, stdout: '', stderr: 'herdr-wa
 assert.equal(L.remoteResult('box1', { code: 1, stdout: '', stderr: hcErr('machine_offline') }).stderr, 'box1 is not reachable');
 assert.equal(L.remoteResult('box1', { code: 1, stdout: '', stderr: hcErr('spawn_failed') }).code, 127);
 // Prefetch: 20 here, 5 on another machine.
-assert.equal(L.prefetchCount(null), 20);
-assert.equal(L.prefetchCount('box1'), 5);
+assert.equal(L.prefetchCount(null), 60);
+assert.equal(L.prefetchCount('box1'), 20);
 
 // One machine through a fake `hc`: it parses, tags rows, and never rejects or waits for a slow one.
 const sessionsJson = id => JSON.stringify({ sessions: [{ ...wire, session_id: id }] });

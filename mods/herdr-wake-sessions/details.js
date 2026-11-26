@@ -30,8 +30,10 @@ export function sessionDetail(s, st, t, { back, resume, fork, copy }) {
   const prs = s.prs ?? [], models = (s.models ?? []).map(modelName);
   const why = cannotResume(s), busy = st.pending ? 'Opening…' : null;
   const state = sessionState(s);
+  // What the session was about leads: its summary, else its title (then kept as a fact below).
   const summary = compactSummary(st.summary ?? s.summary);
-  const showSummary = st.summaryLoading || summary;
+  const title = s.title || `${harnessName(s)} session`;
+  const recap = (st.summarySource ?? s.summarySource) === 'recap';
   return v_flex().size_full().min_h(0)
     .child(h_flex().h(42).flex_none().px(10).gap(8).items_center().border_b(1).border_color(t.border)
       .child(div().id('back').w(20).flex_none().cursor_pointer().text_color(t.muted).hover(x => x.text_color(t.foreground))
@@ -40,18 +42,18 @@ export function sessionDetail(s, st, t, { back, resume, fork, copy }) {
       .child(div().flex_none().text_size(12).text_color(t.dim).child(`${ago(s.activity)} ago`)))
     .child(div().id('session-detail').flex_1().min_h(0).p(14).overflow_y_scrollbar()
       .child(v_flex().gap(12)
-        .child(div().text_size(14).font_semibold().child(s.title || `${harnessName(s)} session`))
+        .child(div().text_size(14).font_semibold().child(summary ?? title))
+        .when(!summary && Boolean(st.summaryLoading), el => el.child(div().text_size(12).text_color(t.dim).child('Loading summary…')))
         .child(h_flex().gap(6).items_center().flex_wrap()
           .child(button('session-resume', st.pending ? 'Opening…' : '▶ Resume session', resume, t, true, why ?? busy))
           .when((s.program ?? 'claude') === 'claude', el => el.child(button('session-fork', 'Fork', fork, t, false, !canFork(s) ? (why ?? 'Not available') : busy)))
           .child(button('session-copy', 'Copy ▾', copy, t)))
         .when(Boolean(st.error), el => el.child(div().text_size(12).text_color(t.blocked).child(st.error)))
-        .when(Boolean(showSummary), el => el.child(v_flex().gap(3)
-          .child(div().text_size(11).text_color(t.dim).child((st.summarySource ?? s.summarySource) === 'recap' && !st.summaryLoading ? 'Recap' : 'Summary'))
-          .child(div().text_size(12.5).text_color(st.summaryLoading && !summary ? t.dim : t.foreground).child(summary ?? 'Loading summary…'))))
         .child(v_flex().gap(6).pt(12).border_t(1).border_color(t.border).text_size(12)
           .child(fact('Status', h_flex().gap(6).items_center()
             .child(div().flex_none().text_color(stateColor(state.key, t)).child('●')).child(state.label)))
+          .when(Boolean(summary), el => el.child(fact('Title', title)))
+          .when(Boolean(summary), el => el.child(fact('Summary', recap ? "the agent's own recap" : 'written by Haiku')))
           .child(fact('Machine', s.machine ?? 'This computer'))
           .child(fact('Agent', harnessName(s)))
           .child(fact('Folder', h_flex().gap(6).flex_wrap().child(folder(s.cwd))

@@ -41,8 +41,9 @@ export function button(id, child, action, t, primary = false, off = null) {
 // space or worktree follows it. `gone`: the folder no longer exists, so it can't be resumed there:
 // red and struck through. Used by a row and by the session's header. A worktree gets the branch
 // icon before its name, as Herdr's spaces sidebar draws one.
-export function placeLine({ repo, tree, worktree, machine }, gone, t) {
-  const name = (text, color) => div().text_color(gone ? t.ansi1 : color).when(gone, el => el.line_through()).child(text);
+// `quiet`: all of it dim (a row's second line).
+export function placeLine({ repo, tree, worktree, machine }, gone, t, quiet = false) {
+  const name = (text, color) => div().text_color(gone ? t.ansi1 : quiet ? t.dim : color).when(gone, el => el.line_through()).child(text);
   // A session from another machine says which first: "laptop · repo › space".
   return h_flex().min_w(0).gap(4).items_center()
     .when(Boolean(machine), el => el.child(div().flex_none().max_w(90).truncate().text_color(t.dim).child(`${machine} ·`)))

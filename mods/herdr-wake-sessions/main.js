@@ -9,7 +9,7 @@ import { normalizeRow, filterSessions, spaceScope, repoFromGit, ago, sessionStat
   spaceFolders, spacePlaces, labelPlace, COPIES, copyValues, cannotResume, canFork, cleanError, parseTicket,
   validSpaceId, validId, harnessName, ALL_MACHINES, THIS_COMPUTER, parseMachines, loadMachine, remoteArgs, remoteResult,
   withTimeout, mergeRows, rowKey, machineOptions, effectivePick, machineNote, noteLines, guessHome, prefetchCount,
-  placeText, localSpaceId, resumeSpace } from './logic.mjs';
+  placeText, localSpaceId, resumeSpace, headline } from './logic.mjs';
 import { sessionDetail } from './details.js';
 import { segmented, iconButton, placeLine, pickerButton } from './ui.js';
 
@@ -80,9 +80,14 @@ export default class WakeSessions extends View {
   get rows() {
     return this.merged ??= mergeRows(new Map([[null, this.local], ...[...this.remote].map(([m, c]) => [m, c.rows ?? []])]));
   }
-  // Machines that gave a list (even an empty one): the picker's choices.
+  // Machines that gave a list (even an empty one).
   answered() { return [...this.remote].filter(([, c]) => c.state === 'ok').map(([m]) => m); }
-  pick() { return effectivePick(shared(PICK), this.answered()); }
+  // Every machine Herdr knows: the picker's choices (one that gave no list says why).
+  machines() { return [...this.remote.keys()]; }
+  machineNotes() {
+    return new Map([...this.remote].flatMap(([m, c]) => { const n = c.state === 'ok' ? null : machineNote(c); return n ? [[m, n]] : []; }));
+  }
+  pick() { return effectivePick(shared(PICK), this.machines()); }
   // Runs herdr-wake: ~/.local/bin/herdr-wake first (the app may not have it on PATH), then PATH.
   async wake(args, options = {}) {
     const candidates = this.bin ? [this.bin] : [home() + '/.local/bin/herdr-wake', 'herdr-wake'];
@@ -138,7 +143,7 @@ export default class WakeSessions extends View {
     this.prefetching.add(key); this.prefetchedAt.set(key, Date.now());
     cx.spawn(async cx => {
       try {
-        const r = await this.wakeOn(cx, machine, ['resurrect', '--prefetch-summaries', String(prefetchCount(machine))], { timeout: 600000 });
+        const r = await this.wakeOn(cx, machine, ['resurrect', '--prefetch-summaries', String(prefetchCount(machine))], { timeout: 1800000 });
         if (r.code === 2) this.noSummaries.add(key);
         else if (r.code === 0) { this.prefetching.delete(key); if (machine) this.loadRemote(machine, cx); else this.refresh(cx, true); }
       } catch (_e) { /* best effort: opening a session still asks for its own */ }
@@ -273,7 +278,7 @@ export default class WakeSessions extends View {
   }
   // The machine picker's menu at the pointer: it writes the choice to shared state, which the panel reads.
   openMachineMenu() {
-    const options = machineOptions(this.answered());
+    const options = machineOptions(this.machines(), this.machineNotes());
     openOverlay({ mod: MOD, kind: 'popup', width: 220, height: 12 + options.length * 31,
       props: { machineMenu: true, options, current: this.pick() } });
   }
@@ -392,9 +397,9 @@ export default class WakeSessions extends View {
         back: (_e, cx) => this.back(cx), resume: (_e, cx) => this.launch(s, false, cx),
         fork: (_e, cx) => this.launch(s, true, cx), copy: (_e, cx) => this.openMenu(s, cx) }));
     }
-    // The machine picker shows once another machine has answered; it sits under the scope control (the
+    // The machine picker shows once Herdr knows another machine; it sits under the scope control (the
     // panel is too narrow for both in one line) and takes the count with it.
-    const picker = this.answered().length > 0;
+    const picker = this.machines().length > 0;
     const countText = div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(count);
     const notes = noteLines([...this.remote].sort(([a], [b]) => (a < b ? -1 : 1)).flatMap(([machine, c]) => {
       const n = c.state === 'ok' ? (c.stale ? machineNote(c.stale) : null) : machineNote(c);
@@ -409,22 +414,23 @@ export default class WakeSessions extends View {
           .child(iconButton('reload', `mods/${MOD}/refresh.svg`, (_e, cx) => this.refresh(cx), t, this.loading || this.inflight.size > 0)))
         .when(picker, el => el.child(h_flex().h(34).flex_none().px(10).pb(8).gap(8).items_center()
           .child(div().w(150).flex_none().flex()
-            .child(pickerButton('machine-pick', machineOptions(this.answered()).find(o => o.key === pick)?.label ?? 'All machines',
+            .child(pickerButton('machine-pick', machineOptions(this.machines()).find(o => o.key === pick)?.label ?? 'All machines',
               (_e, _cx) => this.openMachineMenu(), t)))
           .child(countText))))
       .child(v_flex().flex_none().px(10).pt(10)
         .child(h_flex().h(30).flex_none().px(8).items_center().rounded(8).border_1().border_color(t.border).bg(t.background)
           .child(Input.new(this.input).flex_1().h_full().text_size(12.5).text_color(t.foreground))))
       .when(Boolean(this.error), el => el.child(div().flex_none().px(12).pt(8).text_size(12).text_color(t.blocked).child(this.error)))
-      .child(this.list(rows, query, t, cx))
+      .child(this.list(rows, query, t, cx, pick))
       // Machines that gave no list say why, once and quietly.
       .when(notes.length > 0, el => el.child(v_flex().flex_none().px(12).py(6).gap(2).border_t(1).border_color(t.border)
         .children(notes.map(text => div().text_size(11).text_color(t.dim).child(text)))));
   }
   // The list: a virtual list, so hundreds of sessions cost what the visible rows cost.
-  list(rows, query, t, cx) {
+  list(rows, query, t, cx, pick = ALL_MACHINES) {
     if (!rows.length) {
-      const text = this.loading ? 'Loading sessions…' : query.trim() ? 'No matches'
+      const why = pick && pick !== ALL_MACHINES ? this.machineNotes().get(pick) : null;
+      const text = this.loading ? 'Loading sessions…' : why ? `${pick}: ${why}` : query.trim() ? 'No matches'
         : { all: 'No closed sessions', space: 'No closed sessions in this space. Choose All spaces.',
           folder: 'No closed sessions in this folder. Choose This space or All spaces.' }[this.scope];
       return v_flex().flex_1().min_h(0).p(6).child(div().p(8).text_size(12).text_color(t.dim).child(text));
@@ -455,17 +461,18 @@ export default class WakeSessions extends View {
     if (this.pointerY == null || this.pointerY < 0) return -1;
     return Math.floor((this.pointerY + this.listScroll.offset().y) / ROW);
   }
-  // One row: the agent's icon; "repo > worktree", and under it, dim, what the session was about; then
-  // how long ago and a mark. Drawn inside the virtual list, so no handlers here (the list has them).
+  // One row: the agent's icon and what the session was about (its summary, else its title); under it,
+  // small and dim, where it ran ("machine · repo > worktree"); then how long ago and a mark. Drawn
+  // inside the virtual list, so no handlers here (the list has them).
   row(s, t, hovered = false, names = new Map()) {
     const state = sessionState(s).key;
-    const top = placeLine(this.label(s, names), state === 'missing', t);
+    const where = placeLine(this.label(s, names), state === 'missing', t, true);
     return h_flex().h(ROW).flex_none().px(8).gap(9).items_center().rounded(8).when(hovered, el => el.bg(t.hover))
       .child(v_flex().flex_1().min_w(0).gap(2)
         .child(h_flex().min_w(0).gap(9).items_center()
           .child(div().flex_none().relative().top(1).child(icon(this.programs[s.program ?? 'claude'], 16, t.foreground)))
-          .child(top.flex_1()))
-        .child(div().min_w(0).pl(25).truncate().text_size(11.5).text_color(t.dim).child(s.title || `${harnessName(s)} session`)))
+          .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(headline(s))))
+        .child(div().min_w(0).pl(25).text_size(11.5).child(where)))
       .child(div().flex_none().text_size(11).text_color(t.dim).child(ago(s.activity)))
       // Left mid-work: a yellow dot. Otherwise the place stays empty.
       .child(div().size(7).mx(3).flex_none().rounded(4).when(state === 'stopped', el => el.bg(t.ansi3)));
